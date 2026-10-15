@@ -1,0 +1,6 @@
+[theme]
+base = "light"
+primaryColor = "#7C3AED"              # violet: tabs, focus outlines, toggles
+backgroundColor = "#F7F3FF"           # light lavender page
+secondaryBackgroundColor = "#EDE4FF"  # inputs, tables, expanders
+textColor = "#2E1A47"                 # deep plum, readable on lavender
