@@ -1,0 +1,57 @@
+/* Booth Tracker styles. Base colours live in .streamlit/config.toml. */
+
+/* Big, rounded buttons that are easy to tap on a phone */
+.stButton > button,
+.stDownloadButton > button,
+.stFormSubmitButton > button {
+    min-height: 3rem;
+    border-radius: 0.75rem;
+    border: 1px solid #D8C8FF;
+    background: #FFFFFF;
+    color: #2E1A47;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover,
+.stFormSubmitButton > button:hover {
+    border-color: #7C3AED;
+    color: #7C3AED;
+}
+
+/* Main action (Complete sale): solid violet */
+.stButton > button[data-testid="stBaseButton-primary"] {
+    background: #7C3AED;
+    border-color: #7C3AED;
+    color: #FFFFFF;
+    font-weight: 600;
+}
+
+.stButton > button[data-testid="stBaseButton-primary"]:hover {
+    background: #6D28D9;
+    color: #FFFFFF;
+}
+
+.stButton > button:disabled {
+    background: #F1ECFA;
+    color: #9A8BB5;
+}
+
+/* Metrics as white cards */
+[data-testid="stMetric"] {
+    background: #FFFFFF;
+    border: 1px solid #E4D8FF;
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+}
+
+/* Tabs: slightly larger labels */
+[data-baseweb="tab"] p {
+    font-size: 1rem;
+}
+
+/* Expanders, forms and tables match the rounded look */
+[data-testid="stExpander"] details,
+[data-testid="stForm"],
+[data-testid="stDataFrame"] {
+    border-radius: 0.75rem;
+}
