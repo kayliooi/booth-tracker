@@ -1,4 +1,117 @@
-/* Booth Tracker styles. Base colours live in .streamlit/config.toml. */
+/* Booth Tracker styles: lavender page, violet accents.
+   Colours: lavender #F7F3FF, soft lilac #EDE4FF, border #D8C8FF, violet #7C3AED, deep plum #2E1A47 */
+
+/* Page and top bar */
+.stApp,
+[data-testid="stHeader"] {
+    background: #F7F3FF;
+}
+
+h1, h2, h3 {
+    color: #2E1A47;
+}
+
+/* Tabs: violet underline and text for the selected one */
+/* !important: Streamlit's own selected-tab colour otherwise wins */
+[data-testid="stTab"] .react-aria-SelectionIndicator {
+    background: #7C3AED !important;
+}
+
+[data-testid="stTab"][aria-selected="true"],
+[data-testid="stTab"]:hover {
+    color: #7C3AED;
+}
+
+/* Text boxes and dropdowns: white with a lilac border, violet when in use */
+.stSelectbox [role="group"],
+[data-testid="stTextInputRootElement"],
+[data-testid="stTextAreaRootElement"],
+[data-testid="stNumberInputContainer"],
+[data-testid="stDateInputField"] {
+    background: #FFFFFF;
+    border-color: #D8C8FF;
+}
+
+[data-testid="stTextAreaRootElement"] textarea {
+    background: transparent;
+}
+
+/* Photo upload box */
+[data-testid="stFileUploaderDropzone"] {
+    background: #FFFFFF;
+    border: 1px dashed #D8C8FF;
+}
+
+[data-testid="stTextInputField"],
+[data-testid="stNumberInputField"] {
+    background: transparent;
+}
+
+.stSelectbox [role="group"]:focus-within,
+[data-testid="stTextInputRootElement"]:focus-within,
+[data-testid="stTextAreaRootElement"]:focus-within,
+[data-testid="stNumberInputContainer"]:focus-within,
+[data-testid="stDateInputField"]:focus-within {
+    border-color: #7C3AED;
+}
+
+/* Number box +/- buttons */
+[data-testid="stNumberInputStepUp"]:hover,
+[data-testid="stNumberInputStepDown"]:hover {
+    background: #7C3AED;
+    color: #FFFFFF;
+}
+
+/* Fandom filter pills */
+button[data-variant="pills"] {
+    background: #FFFFFF;
+    border-color: #D8C8FF;
+}
+
+button[data-variant="pills"]:hover {
+    border-color: #7C3AED;
+    color: #7C3AED;
+}
+
+/* !important: Streamlit's own selected-pill colours otherwise win */
+button[data-variant="pills"][aria-checked="true"],
+button[data-variant="pills"][aria-checked="true"] > div {
+    background: #7C3AED !important;
+    border-color: #7C3AED !important;
+    color: #FFFFFF !important;
+}
+
+/* Main menu (Before / At the booth / After): full width, bigger than the filter pills */
+.st-key-menu [data-testid="stButtonGroup"],
+.st-key-menu [role="radiogroup"] {
+    display: flex;
+    flex-wrap: nowrap;
+    width: 100%;
+}
+
+.st-key-menu button[data-variant="pills"] {
+    flex: 1 1 auto;                       /* fill the row; longer labels get more room */
+    justify-content: center;
+    min-height: 2.75rem;
+    font-weight: 600;
+}
+
+/* Checkboxes: violet ticks */
+[data-testid="stCheckbox"][data-selected="true"] label > span + div {
+    background: #7C3AED !important;
+    border-color: #7C3AED !important;
+}
+
+/* Kit checklist only (widget keys start with "kit_"): ticked items crossed out */
+[class*="st-key-kit_"] [data-testid="stCheckbox"][data-selected="true"] p {
+    color: #9A8BB5;
+    text-decoration: line-through;
+}
+
+/* Expander headings */
+[data-testid="stExpander"] summary:hover {
+    color: #7C3AED;
+}
 
 /* Big, rounded buttons that are easy to tap on a phone */
 .stButton > button,

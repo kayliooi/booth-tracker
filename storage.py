@@ -11,19 +11,45 @@ from pathlib import Path
 import pandas as pd
 
 TABLES = {
-    "items": ["item_id", "fandom", "type", "name", "price", "stock", "active"],
+    # active = for sale on the Sell tab; freebie = can be chosen as a free gift;
+    # every_order = added free to every order automatically (thank-you sticker, name card)
+    # unit_cost = what one piece cost to make (average over received batches)
+    "items": ["item_id", "fandom", "type", "name", "price", "stock", "active", "freebie", "every_order",
+              "unit_cost"],
     "events": ["event_id", "name", "date"],
-    # one row per item sold; items bought together share an order_id
+    # one row per item sold; items bought together share an order_id. Free gifts have
+    # freebie = TRUE and total 0 (unit_price keeps the normal price). unit_cost is copied
+    # from the item at the time of sale, for profit.
     "sales": ["sale_id", "order_id", "timestamp", "event", "item_id", "item", "fandom",
-              "qty", "unit_price", "total"],
+              "qty", "unit_price", "total", "freebie", "unit_cost"],
+    # drawings from idea to finished art (stage: idea/sketch/colour/shade/done)
+    "artworks": ["art_id", "title", "fandom", "stage", "target_event", "notes", "link", "created"],
+    # production runs: art_id is blank for reprints; item_id is filled in once received
+    # method: order (from a printer) or self (print myself); status follows that method's steps
+    "batches": ["batch_id", "art_id", "item_id", "name", "fandom", "type", "price", "qty", "cost",
+                "vendor", "method", "status", "created", "received"],
+    # one small JPEG thumbnail per item or artwork (owner_id = item_id or art_id), base64 text
+    # so it fits in a single Google Sheets cell (max 50,000 characters)
+    "images": ["owner_id", "data", "updated"],
     # "qty for price" deals on any mix of items of one type, e.g. Small sticker, 3, 5
     "deals": ["type", "qty", "price"],
+    # spend at least min_spend (after deals) -> count free gifts; the highest rule reached applies
+    "freebie_rules": ["min_spend", "count"],
+    # booth kit (display, decor, tools...): things to bring, not for sale
+    "kit": ["kit_id", "category", "name", "qty", "notes"],
+    # checklist ticks per event: packed = before leaving, returned = packed up at the end
+    "packing": ["event", "kit_id", "packed", "returned"],
 }
 
 
 def _num(s):
     """Convert a column to numbers, ignoring thousands commas. Unreadable values become NaN."""
     return pd.to_numeric(s.astype(str).str.replace(",", ""), errors="coerce")
+
+
+def _bool(s):
+    """Convert a column of TRUE/FALSE (or 1/0, yes/no) text to booleans."""
+    return s.map(lambda v: str(v).strip().upper() in ("TRUE", "1", "YES")).astype(bool)
 
 
 def _coerce(table, df):
@@ -33,14 +59,31 @@ def _coerce(table, df):
     if table == "items":
         df["price"] = _num(df["price"]).fillna(0.0).astype(float)
         df["stock"] = _num(df["stock"]).fillna(0).astype(int)
-        df["active"] = df["active"].map(lambda v: str(v).strip().upper() in ("TRUE", "1", "YES")).astype(bool)
+        df["active"] = _bool(df["active"])
+        df["freebie"] = _bool(df["freebie"])
+        df["every_order"] = _bool(df["every_order"])
+        df["unit_cost"] = _num(df["unit_cost"]).fillna(0.0).astype(float)
     elif table == "sales":
         df["qty"] = _num(df["qty"]).fillna(0).astype(int)
         df["unit_price"] = _num(df["unit_price"]).fillna(0.0).astype(float)
         df["total"] = _num(df["total"]).fillna(0.0).astype(float)
+        df["freebie"] = _bool(df["freebie"])
+        df["unit_cost"] = _num(df["unit_cost"]).fillna(0.0).astype(float)
+    elif table == "batches":
+        df["price"] = _num(df["price"]).fillna(0.0).astype(float)
+        df["qty"] = _num(df["qty"]).fillna(0).astype(int)
+        df["cost"] = _num(df["cost"]).fillna(0.0).astype(float)
+    elif table == "freebie_rules":
+        df["min_spend"] = _num(df["min_spend"]).fillna(0.0).astype(float)
+        df["count"] = _num(df["count"]).fillna(0).astype(int)
     elif table == "deals":
         df["qty"] = _num(df["qty"]).fillna(0).astype(int)
         df["price"] = _num(df["price"]).fillna(0.0).astype(float)
+    elif table == "kit":
+        df["qty"] = _num(df["qty"]).fillna(1).astype(int)
+    elif table == "packing":
+        df["packed"] = _bool(df["packed"])
+        df["returned"] = _bool(df["returned"])
     for col in df.columns:
         if df[col].dtype == object:
             df[col] = df[col].fillna("").astype(str)
