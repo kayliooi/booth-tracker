@@ -11,6 +11,73 @@ h1, h2, h3 {
     color: #2E1A47;
 }
 
+/* ---- Always light ----
+   Phones in dark mode would otherwise get Streamlit's dark-theme text colours (white) on our light
+   lavender page. These rules set the text colours ourselves, whatever mode the phone is in. */
+:root {
+    color-scheme: light;
+}
+
+.stApp,
+.stApp p, .stApp li, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp h4,
+.stApp [data-testid="stMarkdownContainer"],
+.stApp [data-testid="stWidgetLabel"],
+.stApp [data-testid="stMetricValue"],
+.stApp [data-testid="stMetricLabel"],
+.stApp [data-testid="stExpander"] summary,
+.stApp [data-testid="stTab"],
+[data-testid="stHeader"], [data-testid="stHeader"] button {
+    color: #2E1A47;
+}
+
+.stApp [data-testid="stCaptionContainer"],
+.stApp [data-testid="stCaptionContainer"] p {
+    color: #6B5B85;
+}
+
+/* typed text and hints in text boxes, number boxes, dropdowns */
+.stApp input, .stApp textarea {
+    color: #2E1A47 !important;
+    -webkit-text-fill-color: #2E1A47 !important;
+    caret-color: #7C3AED;
+}
+
+.stApp input::placeholder, .stApp textarea::placeholder {
+    color: #9A8BB5 !important;
+    -webkit-text-fill-color: #9A8BB5 !important;
+}
+
+/* outlines of boxes (basket, cards), expanders and forms: lilac in light and dark mode */
+.stApp [data-testid="stVerticalBlock"],
+.stApp [data-testid="stExpander"] details,
+.stApp [data-testid="stForm"] {
+    border-color: #D8C8FF;
+}
+
+/* dropdown lists open outside the app area */
+[role="listbox"] {
+    background: #FFFFFF !important;
+}
+
+[role="listbox"] [role="option"] {
+    color: #2E1A47 !important;
+}
+
+/* text inside buttons and tabs follows the button/tab colour (e.g. white on violet) */
+.stApp button p, .stApp button div,
+.stApp button [data-testid="stMarkdownContainer"],
+.stApp [data-testid="stTab"] p,
+.stApp [data-testid="stTab"] [data-testid="stMarkdownContainer"] {
+    color: inherit;
+}
+
+.stApp .stButton > button,
+.stApp .stDownloadButton > button,
+.stApp .stFormSubmitButton > button,
+.stApp button[data-variant="pills"] {
+    color: #2E1A47;
+}
+
 /* Tabs: violet underline and text for the selected one */
 /* !important: Streamlit's own selected-tab colour otherwise wins */
 [data-testid="stTab"] .react-aria-SelectionIndicator {
@@ -131,15 +198,17 @@ button[data-variant="pills"][aria-checked="true"] > div {
     color: #7C3AED;
 }
 
-/* Main action (Complete sale): solid violet */
-.stButton > button[data-testid="stBaseButton-primary"] {
+/* Main actions (pay buttons, Send idea...): solid violet */
+.stButton > button[data-testid="stBaseButton-primary"],
+.stFormSubmitButton > button[data-testid="stBaseButton-primaryFormSubmit"] {
     background: #7C3AED;
     border-color: #7C3AED;
     color: #FFFFFF;
     font-weight: 600;
 }
 
-.stButton > button[data-testid="stBaseButton-primary"]:hover {
+.stButton > button[data-testid="stBaseButton-primary"]:hover,
+.stFormSubmitButton > button[data-testid="stBaseButton-primaryFormSubmit"]:hover {
     background: #6D28D9;
     color: #FFFFFF;
 }
