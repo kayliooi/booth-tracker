@@ -12,12 +12,13 @@ The menu at the top groups everything by when you use it. The app opens on **�
   - **🎉 Deals** like "any 3 Small stickers for $5"; a deal covers any mix of items of that type.
   - **🎁 Free gifts**: tick *Freebie* on items that can be given away and set rules like "spend $15 → 1 free gift". Tick **📎 Every order** on things that go into every bag (thank-you sticker, name card; untick *For sale*).
   - **🖼️ Price list for your table**: download a printable page of everything for sale, grouped by type or fandom, with deals and photos. Open it and print or save as PDF.
-- **📝 Orders**: pre-orders and commissions: customer, contact, what, price, deposit, due date and collect-at event. Move them 📝 Taken → ✏️ Making → 📦 Ready, then tap how the balance was paid when collected; it's recorded as a sale (the deposit separately, so Cash up stays right). The Sell tab reminds you of orders ready to hand over at that event.
-- **📅 Events**: **⏰ Coming up** shows event days and apply-by / pay-by deadlines (warning within 7 days). Add events, keep the **📅 Convention calendar** (dates, status, deadlines, location), enter **💰 event costs** (table fee, travel, food...) and see sales, costs and profit per event.
+- **📝 Orders**: pre-orders and commissions: customer, contact, what, price, deposit, due date and collect-at event. Move them 📝 Taken → ✏️ Making → 📦 Ready, then tap how the balance was paid when collected; it's recorded as a sale (the deposit separately, so Cash up stays right). The Sell tab reminds you of orders ready to hand over at that event (orders due today first). Pre-orders of existing merch **reserve** that stock: the Sell tab shows "🔒 N reserved" and won't sell into it, and Restock counts it. Pick an event under **For event** to see what still has to be made before it; ready orders also appear in 🧳 Packing as **📦 Orders to bring**, and ⏰ Coming up warns about unfinished orders in the 2 weeks before an event.
+- **📅 Events**: **⏰ Coming up** shows event days and apply-by / pay-by deadlines (warning within 7 days), and "on now: Day 2 of 3" during a multi-day event. **Multi-day events**: set a *Last day* (when adding, or in the calendar). Sales are split into Day 1, Day 2... automatically from their time: Sell shows today's sales next to the whole event, Cash up is counted per day, and Sales, Insights and the event report show a day-by-day breakdown. Add events, keep the **📅 Convention calendar** (dates, status, deadlines, location), enter **💰 event costs** (table fee, travel, food...) and see sales, costs and profit per event.
+- **📣 Promo**: per event, a **✅ promo checklist** (announce, booth number, catalog, sneak peeks, reminder, thank-you post; "Add starter list", editable) and **📸 catalog images**: ready-to-post Instagram post (4:5) or story (9:16) images of what you sell, one per type or fandom, with photos, prices, deal badges, your avatar and a "See you at…" line. Download each or all as a zip.
 - **🧳 Packing**: a checklist of booth items that aren't for sale (tablecloth, stands, card reader...). "Add starter list" fills in common items; edit the list under "Edit kit list".
 
 ### 🛒 At the booth
-- **🛒 Sell**: pick the event, tap items to add them to the basket (🔍 search or filter by fandom), add a **🏷️ discount** if needed (friend, damaged, bundle...), then complete the sale by tapping how they paid: **💵 Cash**, **💳 Card** or **📱 QR**. Deals, free gifts and every-order items are applied automatically and stock goes down. Tap a basket line to take one out; use "Undo last sale" for mistakes.
+- **🛒 Sell**: pick the event, tap items to add them to the basket (🔍 search or filter by fandom), add a **🏷️ discount** if needed (friend, damaged, bundle...), then complete the sale by tapping how they paid: **💵 Cash**, **💳 Card** or **📱 QR**. Deals, free gifts and every-order items are applied automatically and stock goes down. **🤝 Trade with another artist** (in the basket) swaps the items instead: they leave stock at $0, you note who and what you got, and Sales lists them as "Traded away" (not sales; their cost counts like free gifts). Tap a basket line to take one out; use "Undo last sale" for mistakes.
 - **💬 Requests**: note what customers ask for (what to draw, fandom, merch type). Tap **➕1** when someone asks for the same thing. **📣 Share the idea page** gives you a link and QR code for the public idea page (below). In 🗓️ Prep → 🎨 Studio, *Customer requests* lists them most-asked first: **Make it an idea** adds it to your artworks, or dismiss it. Requests are also included in ✨ AI ideas.
 - **💵 Cash up**: end of the day, see takings by Cash / Card / QR, enter your starting float and the cash you counted, and it tells you if the cash box matches, is short or is over. Save the count to keep a record.
 - **🧳 Pack up**: at the end of the day, tick off the booth kit again so nothing is left behind.
@@ -35,6 +36,7 @@ Free gifts are recorded at $0. Photos (items and artworks) are stored as small 2
 
 Settings (currency symbol, timezone, low-stock level) are at the top of `app.py`.
 Colours and styling (lavender theme, buttons, cards) are in `styles/app.css`.
+The logo is `assets/logo.png`; `assets/icon.png` is the round version used for the browser tab, the page headers and the printable pages. Replace `icon.png` (square PNG, transparent corners) to change it.
 
 ---
 
@@ -59,9 +61,10 @@ The app creates the `items`, `events`, `sales`, `deals`, `freebie_rules`, `kit`,
 
 ### 3. Put the code on GitHub
 1. On github.com, create a **new repository**. Set it to **Private**.
-2. Click **Add file → Upload files** and upload `app.py`, `storage.py`, `pricing.py`, `insights.py`, `reports.py`, `requirements.txt`,
-   the `styles` folder and `.streamlit/config.toml` (keep it inside a `.streamlit` folder).
-   Do **not** upload the `.json` key file or `secrets.toml`.
+2. Click **Add file → Upload files** and upload `app.py`, `storage.py`, `pricing.py`, `insights.py`, `reports.py`, `catalog.py`, `requirements.txt`,
+   `README.md`, and the `styles` and `assets` folders (`app.css` inside `styles`; `logo.png` and `icon.png`
+   inside `assets`). `.streamlit/config.toml` isn't needed: the colours are in `styles/app.css`.
+   Do **not** upload the `.json` key file, `secrets.toml` or the `data` folder.
 
 ### 4. Deploy on Streamlit Community Cloud (free)
 1. Go to share.streamlit.io and sign in with GitHub.

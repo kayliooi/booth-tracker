@@ -2,6 +2,7 @@
 import base64
 import io
 import uuid
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,6 +11,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
 
+import catalog
 import insights
 import reports
 from pricing import price_basket
@@ -56,6 +58,18 @@ KIT_STARTER = [
     ("🧃 Personal", "Exhibitor pass / badge", 1, ""),
 ]
 
+# promo checklist suggestions per event, added with "Add starter list" on the Promo tab: (task, hint)
+PROMO_STARTER = [
+    ("Announce you'll be at the event", "Date, location, and your booth number once you know it"),
+    ("Post your booth number / floor map", ""),
+    ("Post the catalog", "Make the images below"),
+    ("Sneak peeks of new merch", "Photos or progress shots from 🎨 Studio"),
+    ("Share the idea page QR", "🛒 At the booth → 💬 Requests → 📣 Share"),
+    ("Reminder post the day before", ""),
+    ("Stories from the booth during the event", ""),
+    ("Thank-you post after the event", "✨ AI ideas → 📣 Social post can write it"),
+]
+
 # Studio: drawing stages in order, and production steps per method (the last step adds stock)
 STAGES = {"idea": "💡 Idea", "sketch": "✏️ Sketch", "colour": "🎨 Colour", "shade": "🌗 Shade", "done": "✅ Done"}
 METHODS = {
@@ -64,8 +78,24 @@ METHODS = {
                                  "done": "✅ Done"}),
 }
 
-st.set_page_config(page_title="Booth Tracker", page_icon="🎨", layout="centered")
+ICON = Path(__file__).parent / "assets" / "icon.png"      # round avatar: tab icon and page headers
+st.set_page_config(page_title="Booth Tracker", page_icon=str(ICON) if ICON.exists() else "🎨", layout="centered")
 st.html(f"<style>{(Path(__file__).parent / 'styles' / 'app.css').read_text(encoding='utf-8')}</style>")
+
+
+def header(title, size=56):
+    """The page title with the round avatar beside it (or a 🎨 when assets/icon.png is missing)."""
+    if not ICON.exists():
+        st.title(f"🎨 {title}")
+        return
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.image(str(ICON), width=size)
+        st.title(title)
+
+
+def icon_b64():
+    """The avatar as base64 text for the printable pages, or "" when there's none."""
+    return base64.b64encode(ICON.read_bytes()).decode() if ICON.exists() else ""
 
 
 def _secret(key):
@@ -166,7 +196,7 @@ def vote_for(request_id, key):
 
 def public_idea_page():
     """The page visitors see at ?page=ideas: suggest an idea and vote on others. Writes to "requests"."""
-    st.title(IDEA_PAGE_TITLE)
+    header(IDEA_PAGE_TITLE, size=72)
     st.write(IDEA_PAGE_INTRO)
     sent = st.session_state.setdefault("ideas_sent", 0)
     if st.session_state.pop("idea_thanks", False):
@@ -218,7 +248,7 @@ if st.query_params.get("page") == "ideas":
 # ---- password gate (set app_password in secrets); everything below needs it ----
 password = _secret("app_password")
 if password and not st.session_state.get("authed"):
-    st.title("🎨 Booth Tracker")
+    header("Booth Tracker")
     entered = st.text_input("Password", type="password")
     if entered == password:
         st.session_state.authed = True
@@ -250,6 +280,8 @@ def clear_basket():
     st.session_state.skip_auto = set()
     st.session_state.disc_amount = None
     st.session_state.disc_reason = None
+    st.session_state.trade_partner = ""
+    st.session_state.trade_received = ""
 
 
 # ---- free gifts (chosen per basket, kept in st.session_state.freebies like the basket) ----
@@ -337,21 +369,31 @@ def current_discount():
 def checkout(event, payment="cash"):
     """Record the basket as one order at an event: a sales row per item, sharing an order_id.
 
-    payment is a PAYMENTS key ("cash", "card", "qr"), saved on every row of the order.
+    payment is a PAYMENTS key ("cash", "card", "qr"), saved on every row of the order, or "trade":
+    the items are swapped with another artist, so they leave stock at $0, no free gifts are added, and
+    who and what you got back go to the "trades" table.
     Free gifts are recorded as extra rows with freebie = TRUE and total 0.
     Lowers stock, remembers the order for "Undo last sale" and empties the basket.
     Refuses if any item no longer has enough stock (e.g. it was sold on another phone).
     """
+    is_trade = payment == "trade"
     items = load("items")
-    quote = quote_basket(st.session_state.get("basket") or {}, items, load("deals"), current_discount())
+    quote = quote_basket(st.session_state.get("basket") or {}, items, load("deals"),
+                         0 if is_trade else current_discount())
     if not quote["lines"]:
         return
+    if is_trade:
+        for line in quote["lines"]:
+            line["charge"], line["discount"] = 0.0, 0.0
+        quote["total"] = 0.0
     reason = st.session_state.get("disc_reason") or ("✏️ Other" if quote["discount"] else "")
-    trim_freebies(freebies_allowed(quote["after_deals"], load("freebie_rules")))
     by_id = items.set_index("item_id")
-    gift_qty = dict(st.session_state.get("freebies", {}))
-    for i, q in auto_gifts(items, st.session_state.get("basket") or {}, gift_qty).items():
-        gift_qty[i] = gift_qty.get(i, 0) + q
+    gift_qty = {}
+    if not is_trade:
+        trim_freebies(freebies_allowed(quote["after_deals"], load("freebie_rules")))
+        gift_qty = dict(st.session_state.get("freebies", {}))
+        for i, q in auto_gifts(items, st.session_state.get("basket") or {}, gift_qty).items():
+            gift_qty[i] = gift_qty.get(i, 0) + q
     gifts = [{"item_id": i, "name": by_id.at[i, "name"], "fandom": by_id.at[i, "fandom"],
               "unit_price": float(by_id.at[i, "price"]), "qty": q, "charge": 0.0, "discount": 0.0}
              for i, q in gift_qty.items() if i in by_id.index]
@@ -359,8 +401,11 @@ def checkout(event, payment="cash"):
     needed = {}                                  # item_id -> pieces leaving the table (sold + free)
     for line in quote["lines"] + gifts:
         needed[line["item_id"]] = needed.get(line["item_id"], 0) + line["qty"]
-    short = [f"{by_id.at[i, 'name']} ({by_id.at[i, 'stock']} left)"
-             for i, q in needed.items() if by_id.at[i, "stock"] < q]
+    reserved = insights.reserved_stock(load("preorders"))     # pieces promised to pre-orders can't be sold
+    free_stock = {i: by_id.at[i, "stock"] - reserved.get(i, 0) for i in needed}
+    short = [f"{by_id.at[i, 'name']} ({free_stock[i]} left"
+             + (f", {reserved[i]} reserved for pre-orders)" if reserved.get(i) else ")")
+             for i, q in needed.items() if free_stock[i] < q]
     if short:
         st.session_state.flash = ("error", "Not enough stock: " + ", ".join(short))
         return
@@ -379,6 +424,18 @@ def checkout(event, payment="cash"):
     save("items", items)
 
     count = sum(line["qty"] for line in quote["lines"])
+    if is_trade:
+        partner = (st.session_state.get("trade_partner") or "").strip() or "another artist"
+        gave = ", ".join(f"{line['qty']}× {line['name']}" for line in quote["lines"])
+        append("trades", {"trade_id": new_id(), "order_id": order_id, "timestamp": timestamp, "event": event,
+                          "partner": partner, "gave": gave,
+                          "received": (st.session_state.get("trade_received") or "").strip(),
+                          "value": quote["subtotal"]})
+        st.session_state.last_order = {"order_id": order_id, "count": count, "free": 0, "total": 0.0,
+                                       "timestamp": timestamp}
+        clear_basket()
+        st.session_state.flash = ("success", f"🤝 Traded {count} item{'s' if count != 1 else ''} with {partner}")
+        return
     free_count = sum(g["qty"] for g in gifts)
     st.session_state.last_order = {"order_id": order_id, "count": count, "free": free_count,
                                    "total": quote["total"], "timestamp": timestamp}
@@ -405,6 +462,9 @@ def delete_order(order_id):
         items.loc[items["item_id"] == row.item_id, "stock"] += int(row.qty)
     save("items", items)
     save("sales", sales[sales["order_id"] != order_id])
+    trades = load("trades")
+    if (trades["order_id"] == order_id).any():           # undoing a trade removes its trade record too
+        save("trades", trades[trades["order_id"] != order_id])
     if (st.session_state.get("last_order") or {}).get("order_id") == order_id:
         st.session_state.last_order = None
     st.session_state.flash = ("info", f"Removed sale of {int(rows['qty'].sum())} item(s), "
@@ -604,7 +664,7 @@ def batch_form(key, art=None):
 
 
 # ---- page ----
-st.title("🎨 Booth Tracker")
+header("Booth Tracker")
 menu_box = st.container()            # Prep / At the booth / After menu, filled at the end of the file
 
 # Always create the message slot (even when empty): if the page layout above the tabs changed,
@@ -619,7 +679,7 @@ events = load("events").sort_values("date", ascending=False)
 sales = load("sales")
 deals = load("deals")
 freebie_rules = load("freebie_rules")
-paid_sales = sales[~sales["freebie"]]             # free gifts don't count as items sold
+paid_sales = insights.paid(sales)                 # free gifts and trades don't count as items sold
 photos = dict(zip(load("images")["owner_id"], load("images")["data"]))   # owner_id -> base64 JPEG
 
 
@@ -643,17 +703,30 @@ def page_sell():
             st.session_state.event = st.session_state.pop("pending_event")
         event = st.selectbox("Event", events["name"].tolist(), key="event")
         ev_sales = paid_sales[paid_sales["event"] == event]
+        first, last = insights.event_dates(events, event)
+        today = now()[:10]
         c1, c2 = st.columns(2)
-        c1.metric("Event sales", money(ev_sales["total"].sum()))
-        c2.metric("Items sold", int(ev_sales["qty"].sum()))
+        if first and first != last and first <= today <= last:          # during a multi-day event
+            todays = ev_sales[ev_sales["timestamp"].str[:10] == today]
+            c1.metric(f"Today · Day {insights.day_number(today, first)}", money(todays["total"].sum()))
+            c2.metric("Whole event", money(ev_sales["total"].sum()))
+            st.caption(f"{int(todays['qty'].sum())} items sold today, {int(ev_sales['qty'].sum())} in total")
+        else:
+            c1.metric("Event sales", money(ev_sales["total"].sum()))
+            c2.metric("Items sold", int(ev_sales["qty"].sum()))
 
-        to_collect = load("preorders")
-        to_collect = to_collect[(to_collect["status"] == "ready") & (to_collect["collect_event"] == event)]
+        preorders = load("preorders")
+        to_collect = preorders[(preorders["status"] == "ready") & (preorders["collect_event"] == event)]
         if not to_collect.empty:
-            st.info(md("📦 Orders to hand over here: "
-                       + ", ".join(f"{o.customer} ({o.description}, balance {money(o.price - o.deposit)})"
-                                   for o in to_collect.itertuples())
-                       + ". Mark them collected in 🗓️ Prep → 📝 Orders."))
+            describe = lambda df: ", ".join(f"{o.customer} ({o.description}, balance {money(o.price - o.deposit)})"
+                                            for o in df.itertuples())
+            due_today = to_collect[to_collect["due"] == today]
+            others = to_collect[to_collect["due"] != today]
+            lines = ([f"📦 **Collecting today:** {describe(due_today)}"] if not due_today.empty else []) + \
+                    ([f"📦 {'Also ready' if not due_today.empty else 'Orders to hand over here'}: {describe(others)}"]
+                     if not others.empty else [])
+            st.info(md("  \n".join(lines) + "  \nMark them collected in 🗓️ Prep → 📝 Orders."))
+        reserved = insights.reserved_stock(preorders)       # promised to pre-orders: not for sale here
 
         basket = st.session_state.setdefault("basket", {})
         quote = quote_basket(basket, items, deals, current_discount()) if basket else None
@@ -665,9 +738,9 @@ def page_sell():
         by_id = items.set_index("item_id")
 
         def left_of(item_id):
-            """Stock not yet in the basket (sold or free)."""
+            """Stock that can still be sold: not in the basket (sold or free) and not reserved for pre-orders."""
             return (by_id.at[item_id, "stock"] - basket.get(item_id, 0) - freebies.get(item_id, 0)
-                    - auto.get(item_id, 0))
+                    - auto.get(item_id, 0) - reserved.get(item_id, 0))
 
         if basket:
             with st.container(border=True):
@@ -724,6 +797,15 @@ def page_sell():
                     for key, label in PAYMENTS.items():
                         st.button(label, key=f"pay_{key}", type="primary", width="stretch",
                                   on_click=checkout, args=(event, key))
+                with st.expander("🤝 Trade with another artist"):
+                    st.caption("Swap these items instead of selling them: they leave your stock, no money "
+                               "is recorded.")
+                    st.text_input("Traded with", key="trade_partner", max_chars=60,
+                                  placeholder="Artist name or @handle")
+                    st.text_input("You got (optional)", key="trade_received", max_chars=120,
+                                  placeholder="e.g. 2 charms + a print")
+                    st.button("🤝 Record trade", key="pay_trade", width="stretch",
+                              on_click=checkout, args=(event, "trade"))
                 st.button("Clear basket", width="stretch", on_click=clear_basket)
 
         last = st.session_state.get("last_order")
@@ -759,7 +841,8 @@ def page_sell():
                 left = left_of(item.item_id)
                 warn = " ⚠️" if 0 < left <= LOW_STOCK else ""
                 deal = f" ({', '.join(hints[item.type])})" if item.type in hints else ""
-                label = f"{item.name} · {money(item.price)}{deal} · {left} left{warn}"
+                held = f" · 🔒{reserved[item.item_id]} reserved" if reserved.get(item.item_id) else ""
+                label = f"{item.name} · {money(item.price)}{deal} · {left} left{held}{warn}"
                 if in_basket:
                     label = f"🧺{in_basket} · {label}"
                 button = dict(label=md(label), key=f"add_{item.item_id}", width="stretch",
@@ -868,7 +951,8 @@ def page_inventory():
             pl_photos = st.checkbox("Include photos", value=True, key="pl_photos")
             pl_hide = st.checkbox("Leave out sold-out items", value=True, key="pl_hide")
             st.download_button("⬇️ Download price list", reports.price_list_html(
-                items, deals, photos, CURRENCY, pl_title, pl_sub, pl_group.lower(), pl_photos, pl_hide),
+                items, deals, photos, CURRENCY, pl_title, pl_sub, pl_group.lower(), pl_photos, pl_hide,
+                logo_b64=icon_b64()),
                 "price-list.html", "text/html", width="stretch")
 
         st.subheader("🎉 Deals")
@@ -919,7 +1003,8 @@ def page_sales():
     """After: totals, by fandom/item, free gifts given, all sales, remove a wrong sale."""
     choice = st.selectbox("Show", ["All events"] + events["name"].tolist(), key="sales_filter")
     everything = sales if choice == "All events" else sales[sales["event"] == choice]
-    view, gifts = everything[~everything["freebie"]], everything[everything["freebie"]]
+    view, gifts = insights.paid(everything), everything[everything["freebie"]]
+    trades_given = insights.traded(everything)
 
     c1, c2 = st.columns(2)
     c1.metric("Total sales", money(view["total"].sum()))
@@ -956,6 +1041,14 @@ def page_sales():
     else:
         total_col = st.column_config.NumberColumn("Total", format=f"{CURRENCY}%.2f")
 
+        first, last = insights.event_dates(events, choice)
+        if choice != "All events" and first != last:
+            st.subheader("By day")
+            st.dataframe(insights.by_day(view, first)[["label", "date", "revenue", "orders", "sold"]],
+                         hide_index=True, width="stretch",
+                         column_config={"label": "Day", "date": "Date", "revenue": total_col, "orders": "Orders",
+                                        "sold": "Items"})
+
         if view["fandom"].ne("").any():
             st.subheader("By fandom")
             by_fandom = (view.assign(fandom=view["fandom"].replace("", "Other"))
@@ -972,6 +1065,17 @@ def page_sales():
                      column_order=["item", "qty", "total"] + (["profit"] if view["cost"].sum() > 0 else []),
                      column_config={"item": "Item", "qty": "Sold", "total": total_col,
                                     "profit": st.column_config.NumberColumn("Profit", format=f"{CURRENCY}%.2f")})
+
+        if not trades_given.empty:
+            st.subheader(f"🤝 Traded away: {int(trades_given['qty'].sum())}")
+            trades = load("trades")
+            trades = trades[trades["order_id"].isin(trades_given["order_id"])].sort_values("timestamp", ascending=False)
+            st.caption(md(f"Normal price of what you traded: {money(trades['value'].sum())}. "
+                          "It counts as cost to make, like free gifts, not as sales."))
+            st.dataframe(trades[["timestamp", "event", "partner", "gave", "received"]], hide_index=True,
+                         width="stretch",
+                         column_config={"timestamp": "Time", "event": "Event", "partner": "With",
+                                        "gave": "You gave", "received": "You got"})
 
         if not gifts.empty:
             st.subheader(f"🎁 Free gifts given: {int(gifts['qty'].sum())}")
@@ -995,7 +1099,8 @@ def page_sales():
                            "text/csv", width="stretch")
         if choice != "All events":
             st.download_button("📄 Event report (printable)", reports.event_report_html(
-                choice, sales, items, events, load("event_costs"), load("requests"), CURRENCY),
+                choice, sales, items, events, load("event_costs"), load("requests"), CURRENCY,
+                logo_b64=icon_b64()),
                 f"report-{choice}.html", "text/html", width="stretch")
 
         with st.expander("🗑️ Remove a sale (mistake)"):
@@ -1096,6 +1201,17 @@ def page_insights():
                                             "sold": "Pieces", "orders": "Orders",
                                             "avg_order": money_col("Avg order")})
 
+        first, last = insights.event_dates(events, scope)
+        days = insights.by_day(scoped, first) if scope != "All events" and first != last else None
+        if days is not None and len(days) > 1:
+            st.subheader("Day by day")
+            st.altair_chart(insights.bar_chart(days, "label", "revenue", CURRENCY, "Sales",
+                                               order=days["label"].tolist()), width="stretch", theme=None)
+            with st.expander("📋 Numbers"):
+                st.dataframe(days[["label", "date", "revenue", "orders", "sold"]], hide_index=True, width="stretch",
+                             column_config={"label": "Day", "date": "Date", "revenue": money_col("Sales"),
+                                            "orders": "Orders", "sold": "Pieces"})
+
         hours = insights.by_hour(scoped)
         if len(hours) > 1:
             st.subheader("Busiest hours")
@@ -1190,7 +1306,18 @@ def page_cashup():
         return
     selling = st.session_state.get("event")
     ev = st.selectbox("Event", names, key="cash_event", index=names.index(selling) if selling in names else 0)
-    by_pay = insights.by_payment(sales[sales["event"] == ev])
+    ev_sales = sales[sales["event"] == ev]
+    first, last = insights.event_dates(events, ev)
+    day = None                                                       # multi-day events are counted per day
+    if first and first != last:
+        days = pd.date_range(first, last).strftime("%Y-%m-%d").tolist()
+        labels = {d: f"Day {i} · {pd.Timestamp(d).strftime('%a %d %b')}" for i, d in enumerate(days, 1)}
+        today = now()[:10]
+        day = st.pills("Day", days, format_func=labels.get, key=f"cash_day_{ev}",
+                       default=today if today in days else days[0]) or (today if today in days else days[0])
+        st.caption("Multi-day event: count the cash at the end of each day, with that morning's float.")
+        ev_sales = ev_sales[ev_sales["timestamp"].str[:10] == day]
+    by_pay = insights.by_payment(ev_sales)
     taken = dict(zip(by_pay["payment"], by_pay["revenue"]))          # e.g. {"cash": 120.0, "qr": 64.0}
 
     st.subheader("Takings by payment")
@@ -1206,9 +1333,11 @@ def page_cashup():
     st.subheader("💵 Count the cash")
     counts = load("cashups")
     counts = counts[counts["event"] == ev].sort_values("timestamp")
+    last_float = float(counts.iloc[-1]["float"]) if not counts.empty else 0.0       # last float used, any day
+    if day:
+        counts = counts[counts["timestamp"].str[:10] == day]
     cash_sales = float(taken.get("cash", 0.0))
-    last_float = float(counts.iloc[-1]["float"]) if not counts.empty else 0.0
-    float_key, counted_key = f"float_{ev}", f"counted_{ev}"
+    float_key, counted_key = f"float_{ev}_{day or ''}", f"counted_{ev}_{day or ''}"
     flt = st.number_input(f"Starting float ({CURRENCY}): cash you brought for change", min_value=0.0, step=5.0,
                           format="%.2f", value=last_float, key=float_key)
     counted = st.number_input(f"Cash counted now ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f",
@@ -1228,7 +1357,7 @@ def page_cashup():
         st.button("💾 Save cash count", width="stretch", on_click=save_cashup,
                   args=(ev, float_key, counted_key, cash_sales))
     if not counts.empty:
-        st.caption("Saved counts for this event")
+        st.caption("Saved counts for this day" if day else "Saved counts for this event")
         st.dataframe(counts[["timestamp", "float", "cash_sales", "counted", "difference"]], hide_index=True,
                      width="stretch",
                      column_config={"timestamp": "Time", **{c: st.column_config.NumberColumn(
@@ -1245,20 +1374,23 @@ def page_restock():
     money_col = lambda title: st.column_config.NumberColumn(title, format=f"{CURRENCY}%.2f")
 
     st.subheader("🔮 Next event: what to bring")
-    forecast = insights.restock_forecast(sales, items[items["active"]], events)
-    st.caption("Based on the average sold per event so far (all events), plus 25% extra. "
-               "A rough guide from past sales, not a promise.")
+    forecast = insights.restock_forecast(sales, items[items["active"]], events,
+                                         reserved=insights.reserved_stock(load("preorders")))
+    st.caption("Based on the average sold per event so far (all events), plus 25% extra, on top of pieces "
+               "reserved for pre-orders. A rough guide from past sales, not a promise.")
     need = forecast[forecast["reprint"] > 0]
     if need.empty:
         st.success("You have enough stock of everything that has sold before.")
     else:
         st.warning("Reprint before the next event: " + ", ".join(
             f"{r.name} (+{int(r.reprint)})" for r in need.itertuples()))
-    st.dataframe(forecast[["name", "avg_per_event", "bring", "stock", "reprint"]], hide_index=True,
+    st.dataframe(forecast[["name", "avg_per_event", "bring", "stock", "reserved", "reprint"]], hide_index=True,
                  width="stretch",
+                 column_order=["name", "avg_per_event", "bring", "stock"]
+                 + (["reserved"] if forecast["reserved"].sum() else []) + ["reprint"],
                  column_config={"name": "Item", "avg_per_event": st.column_config.NumberColumn(
                      "Avg / event", format="%.1f"), "bring": "Bring", "stock": "In stock",
-                     "reprint": "Reprint"})
+                     "reserved": "🔒 Reserved", "reprint": "Reprint"})
 
     st.subheader("Items")
     scope = st.selectbox("Show", ["All events"] + events["name"].tolist(), key="restock_scope")
@@ -1354,7 +1486,13 @@ def coming_up(events, days=60):
     found = []
     for e in events.itertuples():
         status = (e.status or "").lower()
-        checks = [(e.date, f"🎪 {e.name}" + (f" @ {e.location}" if e.location else ""))]
+        first, last = insights.event_dates(events, e.name)
+        n_days = (date.fromisoformat(last) - date.fromisoformat(first)).days + 1 if first else 1
+        checks = [(e.date, f"🎪 {e.name}" + (f" ({n_days} days)" if n_days > 1 else "")
+                   + (f" @ {e.location}" if e.location else ""))]
+        if first and first < today.isoformat() <= last and status != "rejected":     # a multi-day event is on now
+            day_now = (today - date.fromisoformat(first)).days + 1
+            found.append((today, 0, f"🎪 {e.name} is on now: Day {day_now} of {n_days}"))
         if status in ("", "interested"):
             checks.append((e.apply_by, f"📝 Apply for {e.name}"))
         if status not in ("paid", "rejected"):
@@ -1366,6 +1504,14 @@ def coming_up(events, days=60):
                 continue
             if 0 <= (d - today).days <= days and status != "rejected":
                 found.append((d, (d - today).days, text))
+    # pre-orders that still need making within 2 weeks of the event they're collected at
+    orders = load("preorders")
+    unfinished = orders[orders["status"].isin(["taken", "making"])].groupby("collect_event").size()
+    for event, n in unfinished.items():
+        first, _ = insights.event_dates(events, event)
+        if first and 0 <= (date.fromisoformat(first) - today).days <= 14:
+            d = date.fromisoformat(first)
+            found.append((d, (d - today).days, f"📝 {n} order{'s' if n > 1 else ''} for {event} not ready yet"))
     return sorted(found)
 
 
@@ -1383,7 +1529,8 @@ def page_events():
     with st.expander("➕ Add event", expanded=events.empty):
         with st.form("add_event", clear_on_submit=True):
             ev_name = st.text_input("Event name", placeholder="e.g. Comic Fiesta 2026")
-            ev_date = st.date_input("Date", value=date.today())
+            ev_date = st.date_input("Date (first day)", value=date.today())
+            ev_end = st.date_input("Last day (only for multi-day events)", value=None)
             ev_place = st.text_input("Location (optional)", placeholder="e.g. Suntec City Hall 401")
             ev_status = st.selectbox("Status", EVENT_STATUSES, index=0)
             if st.form_submit_button("➕ Add event", width="stretch"):
@@ -1392,10 +1539,13 @@ def page_events():
                     st.error("Event name is required")
                 elif ev_name.lower() in events["name"].str.lower().tolist():
                     st.error(f"'{ev_name}' already exists")
+                elif ev_end and ev_end < ev_date:
+                    st.error("The last day can't be before the first day")
                 else:
                     append("events", {"event_id": new_id(), "name": ev_name, "date": ev_date.isoformat(),
-                                            "location": ev_place.strip(), "status": ev_status, "apply_by": "",
-                                            "pay_by": "", "notes": ""})
+                                      "end_date": ev_end.isoformat() if ev_end and ev_end > ev_date else "",
+                                      "location": ev_place.strip(), "status": ev_status, "apply_by": "",
+                                      "pay_by": "", "notes": ""})
                     st.session_state.pending_event = ev_name     # select it on the Sell tab
                     st.session_state.flash = ("success", f"Added event {ev_name}")
                     st.rerun()
@@ -1406,20 +1556,25 @@ def page_events():
     st.subheader("📅 Convention calendar")
     st.caption("Edit dates, deadlines and status, then save. (Event names can't be changed here, "
                "because sales are filed under them.)")
-    as_dates = events.assign(**{c: pd.to_datetime(events[c], errors="coerce") for c in ("date", "apply_by", "pay_by")})
+    date_cols = ("date", "end_date", "apply_by", "pay_by")
+    as_dates = events.assign(**{c: pd.to_datetime(events[c], errors="coerce") for c in date_cols})
     edited_events = st.data_editor(
         as_dates.set_index("event_id"), hide_index=True, width="stretch", key="calendar_editor",
-        column_order=["name", "date", "status", "apply_by", "pay_by", "location", "notes"], disabled=["name"],
+        column_order=["name", "date", "end_date", "status", "apply_by", "pay_by", "location", "notes"],
+        disabled=["name"],
         column_config={
             "name": "Event", "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+            "end_date": st.column_config.DateColumn("Last day", format="YYYY-MM-DD",
+                                                    help="Only for multi-day events; leave empty for one day"),
             "status": st.column_config.SelectboxColumn("Status", options=EVENT_STATUSES),
             "apply_by": st.column_config.DateColumn("Apply by", format="YYYY-MM-DD"),
             "pay_by": st.column_config.DateColumn("Pay by", format="YYYY-MM-DD"),
             "location": "Location", "notes": "Notes"})
     if st.button("💾 Save calendar", width="stretch"):
         saved = edited_events.reset_index()
-        for c in ("date", "apply_by", "pay_by"):
+        for c in date_cols:
             saved[c] = pd.to_datetime(saved[c], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+        saved.loc[saved["end_date"] <= saved["date"], "end_date"] = ""        # same day or earlier = one day
         save("events", saved)
         st.session_state.flash = ("success", "Calendar saved")
         st.rerun()
@@ -1558,9 +1713,29 @@ def page_orders():
     if preorders.empty:
         st.caption("Orders you take show up here, from 📝 Taken to ✅ Collected.")
         return
-    is_open = preorders["status"].isin(["taken", "making", "ready"])
+    is_open = preorders["status"].isin(insights.OPEN_ORDER_STATUSES)
     owed = (preorders.loc[is_open, "price"] - preorders.loc[is_open, "deposit"]).sum()
     st.caption(md(f"{int(is_open.sum())} open · {money(owed)} still to collect"))
+
+    # prepare for one event: what still has to be made before it, what's ready to pack
+    with_event = [e for e in events["name"] if (preorders.loc[is_open, "collect_event"] == e).any()]
+    for_event = st.selectbox("For event", ["All events"] + with_event, key="order_event",
+                             help="Show only the orders to hand over at one event")
+    if for_event != "All events":
+        mine = preorders[is_open & (preorders["collect_event"] == for_event)]
+        counts = mine["status"].value_counts()
+        first, _ = insights.event_dates(events, for_event)
+        days_left = (date.fromisoformat(first) - date.today()).days if first else None
+        summary = (f"**{for_event}**" + (f" (in {days_left} days)" if days_left and days_left > 0 else "") + ": "
+                   + " · ".join(f"{int(counts.get(k, 0))} {label.split(' ', 1)[1].lower()}"
+                                for k, label in ORDER_STEPS.items() if k != "collected"))
+        not_ready = mine[mine["status"] != "ready"]
+        (st.warning if not not_ready.empty and days_left is not None and days_left <= 14 else st.markdown)(
+            md(summary + (f"  \nStill to finish: " + ", ".join(f"{o.customer} ({o.description})"
+                                                              for o in not_ready.itertuples())
+                          if not not_ready.empty else "  \n✅ Everything is ready. Pack them in 🧳 Packing.")))
+        preorders = preorders[preorders["collect_event"] == for_event]
+        is_open = preorders["status"].isin(insights.OPEN_ORDER_STATUSES)
     show = st.pills("Show", ["Open", "Collected", "Cancelled"], default="Open", key="order_filter") or "Open"
     shown = {"Open": preorders[is_open], "Collected": preorders[preorders["status"] == "collected"],
              "Cancelled": preorders[preorders["status"] == "cancelled"]}[show]
@@ -1592,6 +1767,87 @@ def page_orders():
                         for key, label in PAYMENTS.items():
                             st.button(label, key=f"collect_{key}_{o.preorder_id}", type="primary", width="stretch",
                                       on_click=collect_preorder, args=(o.preorder_id, key))
+
+
+# ---- Promo (social media checklist per event + catalog images) ----
+def add_starter_promo():
+    """Fill an empty promo checklist with PROMO_STARTER suggestions."""
+    append_rows("promo_tasks", [{"task_id": new_id(), "task": t, "hint": h} for t, h in PROMO_STARTER])
+
+
+def page_promo():
+    """Prep: tick off social media posts per event, and make catalog images to post."""
+    if events.empty:
+        st.info("Add an event first: 🗓️ Prep → 📅 Events.")
+        return
+    names = events["name"].tolist()
+    promo_event = st.selectbox("Event", names, key="promo_event")
+    tasks = load("promo_tasks")
+
+    st.subheader("✅ Promo checklist")
+    if tasks.empty:
+        st.caption("A list of posts to do for each event: announce, booth number, catalog, thank-you...")
+        st.button("✨ Add starter list", key="promo_starter", on_click=add_starter_promo, width="stretch")
+    else:
+        packing = load("packing")
+        ticks = packing[packing["event"] == promo_event].set_index("kit_id")["packed"]
+        done = tasks["task_id"].map(lambda t: bool(ticks.get(f"promo_{t}", False)))
+        st.markdown(f"**Done {int(done.sum())} / {len(tasks)}**" + (" 🎉" if done.all() else ""))
+        for task, is_done in zip(tasks.itertuples(), done):
+            tick_id = f"promo_{task.task_id}"
+            key = f"kit_promo_{promo_event}_{task.task_id}"            # "kit_" prefix: crossed out when ticked
+            st.checkbox(md(task.task + (f" · _{task.hint}_" if task.hint else "")), value=is_done, key=key,
+                        on_change=set_tick, args=(promo_event, tick_id, "packed", key))
+        with st.expander("✏️ Edit checklist"):
+            edited_tasks = st.data_editor(
+                tasks, num_rows="dynamic", hide_index=True, width="stretch", key="promo_editor",
+                column_order=["task", "hint"],
+                column_config={"task": st.column_config.TextColumn("Task", required=True),
+                               "hint": st.column_config.TextColumn("Hint")})
+            if st.button("💾 Save checklist", width="stretch"):
+                keep = edited_tasks[edited_tasks["task"].fillna("").str.strip() != ""].copy()
+                new_rows = keep["task_id"].fillna("") == ""
+                keep.loc[new_rows, "task_id"] = [new_id() for _ in range(new_rows.sum())]
+                save("promo_tasks", keep)
+                st.session_state.flash = ("success", "Checklist saved")
+                st.rerun()
+    st.caption("Need captions? 📈 After → ✨ AI ideas → 📣 Social post.")
+
+    st.subheader("📸 Catalog images")
+    st.caption("Ready-to-post images of what you sell: photos, prices and deals, with your avatar.")
+    fmt = st.pills("Size", ["post", "story"], default="post", key="cat_fmt",
+                   format_func={"post": "Post (4:5)", "story": "Story (9:16)"}.get) or "post"
+    group = st.pills("One image per", ["type", "fandom"], default="type", key="cat_group",
+                     format_func=str.title) or "type"
+    title = st.text_input("Title", value="My merch", key="cat_title", max_chars=40)
+    subtitle = st.text_input("Line under the title", key="cat_sub", max_chars=60,
+                             placeholder="e.g. @your_handle | Cash, card & PayNow")
+    first, last = insights.event_dates(events, promo_event)
+    when = ""
+    if first:
+        a, b = pd.Timestamp(first), pd.Timestamp(last)
+        when = a.strftime("%d %b") if a == b else f"{a.strftime('%d')}-{b.strftime('%d %b')}"
+    place = events.set_index("name").at[promo_event, "location"]
+    footer = st.text_input("Bottom line", key=f"cat_footer_{promo_event}", max_chars=70,
+                           value=" · ".join(x for x in [f"See you at {promo_event}", when, place] if x))
+    hide_out = st.checkbox("Leave out sold-out items", value=True, key="cat_hide")
+    if st.button("🖼️ Make catalog images", type="primary", width="stretch"):
+        st.session_state.catalog = catalog.catalog_pages(
+            items, deals, photos, CURRENCY, title, subtitle, footer, fmt, group,
+            ICON.read_bytes() if ICON.exists() else None, hide_out)
+    pages = st.session_state.get("catalog") or []
+    if pages:
+        st.caption(f"{len(pages)} image{'s' if len(pages) != 1 else ''}: post them as one carousel. "
+                   "Tap Download under each, or get them all at once.")
+        zipped = io.BytesIO()
+        with zipfile.ZipFile(zipped, "w") as z:
+            for n, png in enumerate(pages, 1):
+                z.writestr(f"catalog-{n}.png", png)
+        st.download_button("⬇️ Download all (zip)", zipped.getvalue(), "catalog.zip", "application/zip",
+                           width="stretch")
+        for n, png in enumerate(pages, 1):
+            st.image(png, width=280)
+            st.download_button(f"⬇️ Image {n}", png, f"catalog-{n}.png", "image/png", key=f"cat_dl_{n}")
 
 
 # ---- Kit (booth packing checklist) ----
@@ -1635,6 +1891,21 @@ def page_kit(field):
                 key = f"kit_{field}_{kit_event}_{item.kit_id}"
                 st.checkbox(md(label), value=bool(is_done), key=key,
                             on_change=set_tick, args=(kit_event, item.kit_id, field, key))
+
+        if field == "packed":
+            # pre-orders to hand over at this event go in the bag too (ticks saved like kit items)
+            orders = load("preorders")
+            orders = orders[orders["status"].isin(insights.OPEN_ORDER_STATUSES) & (orders["collect_event"] == kit_event)]
+            if not orders.empty:
+                st.caption("**📦 Orders to bring**")
+                for o in orders.sort_values("customer").itertuples():
+                    tick_id = f"order_{o.preorder_id}"
+                    label = f"{o.customer}: {o.description}" + (f" ×{o.qty}" if o.qty > 1 else "")
+                    if o.status != "ready":
+                        label += f" · ⚠️ _not ready yet ({ORDER_STEPS[o.status].split(' ', 1)[1].lower()})_"
+                    key = f"kit_{field}_{kit_event}_{tick_id}"
+                    st.checkbox(md(label), value=bool(ticks.get(tick_id, False)), key=key,
+                                on_change=set_tick, args=(kit_event, tick_id, field, key))
 
     if not kit.empty and field == "packed":
         with st.expander("✏️ Edit kit list"):
@@ -1821,7 +2092,7 @@ def page_studio():
 # ---- menu: Prep / At the booth / After, each with its own tabs ----
 MENU = {
     "🗓️ Prep": [("🎨 Studio", page_studio), ("📦 Inventory", page_inventory), ("📝 Orders", page_orders),
-                ("📅 Events", page_events),
+                ("📅 Events", page_events), ("📣 Promo", page_promo),
                   ("🧳 Packing", lambda: page_kit("packed"))],
     "🛒 At the booth": [("🛒 Sell", page_sell), ("💬 Requests", page_requests), ("💵 Cash up", page_cashup),
                        ("🧳 Pack up", lambda: page_kit("returned"))],

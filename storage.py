@@ -16,8 +16,9 @@ TABLES = {
     # unit_cost = what one piece cost to make (average over received batches)
     "items": ["item_id", "fandom", "type", "name", "price", "stock", "active", "freebie", "every_order",
               "unit_cost"],
-    # date = event day; apply_by / pay_by = convention deadlines; status: interested/applied/accepted/paid/rejected
-    "events": ["event_id", "name", "date", "location", "status", "apply_by", "pay_by", "notes"],
+    # date = (first) event day; end_date = last day for multi-day events (blank = one day);
+    # apply_by / pay_by = convention deadlines; status: interested/applied/accepted/paid/rejected
+    "events": ["event_id", "name", "date", "location", "status", "apply_by", "pay_by", "notes", "end_date"],
     # pre-orders (of an existing item) and commissions taken from customers; the full price is
     # recorded as a sale when collected. status: taken/making/ready/collected/cancelled
     "preorders": ["preorder_id", "created", "kind", "customer", "contact", "description", "item_id", "qty",
@@ -29,6 +30,11 @@ TABLES = {
               "qty", "unit_price", "total", "freebie", "unit_cost", "payment", "discount", "discount_reason"],
     # money spent to do an event (table fee, travel, food...), for profit after costs
     "event_costs": ["cost_id", "event", "category", "amount", "note"],
+    # trades with other artists: what you gave is in sales (payment "trade", total 0, same order_id);
+    # this keeps who you traded with and what you got in return
+    "trades": ["trade_id", "order_id", "timestamp", "event", "partner", "gave", "received", "value"],
+    # promo checklist tasks (ticks per event are kept in "packing" as kit_id "promo_<task_id>")
+    "promo_tasks": ["task_id", "task", "hint"],
     # end-of-day cash counts: expected = float + cash sales; difference = counted - expected
     "cashups": ["cashup_id", "timestamp", "event", "float", "cash_sales", "counted", "difference"],
     # drawings from idea to finished art (stage: idea/sketch/colour/shade/done)
@@ -88,6 +94,8 @@ def _coerce(table, df):
         df["qty"] = _num(df["qty"]).fillna(1).astype(int)
         df["price"] = _num(df["price"]).fillna(0.0).astype(float)
         df["deposit"] = _num(df["deposit"]).fillna(0.0).astype(float)
+    elif table == "trades":
+        df["value"] = _num(df["value"]).fillna(0.0).astype(float)
     elif table == "event_costs":
         df["amount"] = _num(df["amount"]).fillna(0.0).astype(float)
     elif table == "cashups":

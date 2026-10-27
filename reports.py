@@ -17,6 +17,8 @@ body { font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; color: #2E1
        background: #F7F3FF; }
 .sheet { max-width: 820px; margin: 0 auto; background: #fff; border-radius: 16px; padding: 28px 32px; }
 h1 { font-size: 30px; margin: 0 0 4px; }
+.head { display: flex; align-items: center; gap: 14px; }
+.logo { width: 72px; height: 72px; border-radius: 50%; flex: none; }
 h2 { font-size: 20px; margin: 26px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #EDE4FF; }
 .sub { color: #6B5B85; margin: 0 0 8px; }
 .deal { display: inline-block; background: #7C3AED; color: #fff; border-radius: 999px; padding: 3px 12px;
@@ -47,15 +49,21 @@ def _page(title, body):
             f"<style>{PAGE_CSS}</style></head><body><div class='sheet'>{body}</div></body></html>")
 
 
+def _title(text, logo_b64=""):
+    """The page heading, with the round avatar beside it when there is one."""
+    logo = f"<img class='logo' src='data:image/png;base64,{logo_b64}' alt=''>" if logo_b64 else ""
+    return f"<div class='head'>{logo}<h1>{escape(text)}</h1></div>"
+
+
 def _money(currency, x):
     return f"{currency}{x:,.2f}"
 
 
 def price_list_html(items, deals, photos, currency, title="Price list", subtitle="", group_by="type",
-                    with_photos=True, hide_sold_out=True):
+                    with_photos=True, hide_sold_out=True, logo_b64=""):
     """A printable price list of the items for sale, grouped by type or fandom, with deals and photos.
 
-    photos: {item_id: base64 JPEG}. Returns the HTML page as a string.
+    photos: {item_id: base64 JPEG}; logo_b64: base64 PNG shown beside the title. Returns the HTML page.
     """
     shown = items[items["active"]]
     if hide_sold_out:
@@ -64,7 +72,7 @@ def price_list_html(items, deals, photos, currency, title="Price list", subtitle
     for d in deals.itertuples():
         deal_text.setdefault(d.type, []).append(f"{d.qty} for {_money(currency, d.price)}")
     key = "type" if group_by == "type" else "fandom"
-    parts = [f"<h1>{escape(title)}</h1>"] + ([f"<p class='sub'>{escape(subtitle)}</p>"] if subtitle else [])
+    parts = [_title(title, logo_b64)] + ([f"<p class='sub'>{escape(subtitle)}</p>"] if subtitle else [])
     for group, rows in shown.sort_values([key, "name"]).groupby(key, sort=False):
         heading = escape(group or "Other")
         if key == "type" and group in deal_text:
@@ -82,7 +90,7 @@ def price_list_html(items, deals, photos, currency, title="Price list", subtitle
     return _page(title, "".join(parts))
 
 
-def event_report_html(event, sales, items, events, event_costs, requests, currency):
+def event_report_html(event, sales, items, events, event_costs, requests, currency, logo_b64=""):
     """A one-page summary of one event: money, best sellers, fandoms, payments, gifts, costs, requests."""
     ev_sales = sales[sales["event"] == event]
     h = insights.headline(ev_sales)
@@ -94,9 +102,11 @@ def event_report_html(event, sales, items, events, event_costs, requests, curren
 
     tiles = [("Sales", m(h["revenue"])), ("Orders", h["orders"]), ("Average order", m(h["avg_order"])),
              ("Pieces sold", h["items"]), ("Event costs", m(spent)), ("Profit after costs", m(profit))]
-    sub = " · ".join(x for x in [row["date"] if row is not None else "", row["location"] if row is not None else ""]
-                     if x)
-    parts = [f"<h1>📄 {escape(event)}</h1>", f"<p class='sub'>{escape(sub)}</p>" if sub else "",
+    first_day, last_day = insights.event_dates(events, event)
+    when = f"{first_day} to {last_day}" if first_day != last_day else first_day
+    sub = " · ".join(x for x in [when, row["location"] if row is not None else ""] if x)
+    parts = [_title(event, logo_b64) if logo_b64 else _title(f"📄 {event}"),
+             f"<p class='sub'>{escape(sub)}</p>" if sub else "",
              "<div class='tiles'>" + "".join(f"<div class='tile'><div class='label'>{k}</div>"
                                               f"<div class='value'>{v}</div></div>" for k, v in tiles) + "</div>"]
 
@@ -109,6 +119,13 @@ def event_report_html(event, sales, items, events, event_costs, requests, curren
                                         for col, _, kind in cols) + "</tr>" for _, r in df.iterrows())
         return f"<table><tr>{head}</tr>{body}</table>"
 
+    first, last = insights.event_dates(events, event)
+    if first != last:
+        days = insights.by_day(ev_sales, first)
+        if not days.empty:
+            parts += ["<h2>By day</h2>", table(days, [("label", "Day", "text"), ("date", "Date", "text"),
+                                                      ("orders", "Orders", "num"), ("sold", "Pieces", "num"),
+                                                      ("revenue", "Sales", "money")])]
     perf = insights.item_performance(ev_sales, items)
     perf = perf[perf["sold"] > 0].head(10)
     if not perf.empty:
@@ -124,10 +141,12 @@ def event_report_html(event, sales, items, events, event_costs, requests, curren
         parts += ["<h2>Payments</h2>", table(pay, [("payment", "Paid by", "text"), ("orders", "Orders", "num"),
                                                     ("revenue", "Amount", "money")])]
     gifts = ev_sales[ev_sales["freebie"]]
+    swaps = insights.traded(ev_sales)
     disc = ev_sales["discount"].sum()
-    if not gifts.empty or disc:
-        parts.append("<h2>Gifts & discounts</h2><p>"
+    if not gifts.empty or disc or not swaps.empty:
+        parts.append("<h2>Gifts, trades & discounts</h2><p>"
                      + (f"{int(gifts['qty'].sum())} free gifts given. " if not gifts.empty else "")
+                     + (f"{int(swaps['qty'].sum())} pieces traded with other artists. " if not swaps.empty else "")
                      + (f"{m(disc)} in discounts." if disc else "") + "</p>")
     if not costs.empty:
         parts += ["<h2>Event costs</h2>", table(costs, [("category", "What", "text"), ("note", "Note", "text"),

@@ -17,8 +17,13 @@ INK, MUTED, GRID = "#2E1A47", "#6B5B85", "#E6DCFA"
 
 # ---- numbers ----
 def paid(sales):
-    """Sales rows that were paid for (free gifts excluded)."""
-    return sales[~sales["freebie"]]
+    """Sales rows that were paid for (free gifts and trades excluded)."""
+    return sales[~sales["freebie"] & (sales["payment"] != "trade")]
+
+
+def traded(sales):
+    """Sales rows for items traded away with other artists (no money, but they left stock)."""
+    return sales[sales["payment"] == "trade"]
 
 
 def headline(sales):
@@ -72,6 +77,40 @@ def by_event(sales, events, event_costs=None):
     return out.sort_values("date")
 
 
+def event_dates(events, event):
+    """(first day, last day) of an event as "YYYY-MM-DD" strings; last = first for one-day events.
+
+    ("", "") if the event is unknown or has no date.
+    """
+    row = events[events["name"] == event]
+    if row.empty or not row.iloc[0]["date"]:
+        return "", ""
+    first = str(row.iloc[0]["date"])[:10]
+    last = str(row.iloc[0].get("end_date", "") or "")[:10]
+    return first, max(first, last) if last else first
+
+
+def day_number(timestamp, first_day):
+    """Which day of the event a sale happened on: 1 for the first day, 2 for the next... (0 if unknown)."""
+    try:
+        return (pd.Timestamp(str(timestamp)[:10]) - pd.Timestamp(first_day)).days + 1
+    except (ValueError, TypeError):
+        return 0
+
+
+def by_day(sales, first_day):
+    """Per event day (from the sale times): day number, date, revenue, orders and pieces sold."""
+    p = paid(sales)
+    if p.empty or not first_day:
+        return pd.DataFrame(columns=["day", "label", "date", "revenue", "orders", "sold"])
+    p = p.assign(date=p["timestamp"].str[:10])
+    out = (p.groupby("date", as_index=False)
+           .agg(revenue=("total", "sum"), orders=("order_id", "nunique"), sold=("qty", "sum")))
+    out["day"] = [day_number(d, first_day) for d in out["date"]]
+    out["label"] = [f"Day {d}" if d > 0 else "Before" for d in out["day"]]
+    return out.sort_values("date")[["day", "label", "date", "revenue", "orders", "sold"]]
+
+
 def by_payment(sales):
     """Money and orders per payment method (blank = recorded before payment methods existed)."""
     p = paid(sales)
@@ -103,25 +142,36 @@ def item_performance(sales, items):
     return out.sort_values(["sold", "revenue"], ascending=False)
 
 
-def restock_forecast(sales, items, events, buffer=1.25):
+OPEN_ORDER_STATUSES = ("taken", "making", "ready")
+
+
+def reserved_stock(preorders):
+    """Pieces of existing items promised to open pre-orders: {item_id: qty}. Not for sale at the booth."""
+    open_ = preorders[preorders["status"].isin(OPEN_ORDER_STATUSES) & (preorders["item_id"] != "")]
+    return open_.groupby("item_id")["qty"].sum().astype(int).to_dict()
+
+
+def restock_forecast(sales, items, events, buffer=1.25, reserved=None):
     """A simple "what to bring next time" guess per item that has sold before.
 
     Average pieces sold per event (counting events from the item's first sale onwards), plus a
-    25% buffer, compared with stock on hand. It's an average of the past, not a guarantee.
+    25% buffer, compared with stock on hand minus pieces reserved for pre-orders ({item_id: qty}).
+    It's an average of the past, not a guarantee.
     """
     p = paid(sales)
     if p.empty:
-        return pd.DataFrame(columns=["name", "avg_per_event", "bring", "stock", "reprint"])
+        return pd.DataFrame(columns=["name", "avg_per_event", "bring", "stock", "reserved", "reprint"])
     dates = dict(zip(events["name"], events["date"]))
-    event_dates = sorted({dates.get(e, "") for e in p["event"].unique()})
+    sale_dates = sorted({dates.get(e, "") for e in p["event"].unique()})
     rows = []
     for item_id, group in p.groupby("item_id"):
         first = min(dates.get(e, "") for e in group["event"].unique())
-        n_events = sum(1 for d in event_dates if d >= first) or 1
+        n_events = sum(1 for d in sale_dates if d >= first) or 1
         avg = group["qty"].sum() / n_events
         rows.append({"item_id": item_id, "avg_per_event": avg, "bring": math.ceil(avg * buffer)})
     out = pd.DataFrame(rows).merge(items[["item_id", "name", "stock"]], on="item_id")
-    out["reprint"] = (out["bring"] - out["stock"].clip(lower=0)).clip(lower=0)
+    out["reserved"] = out["item_id"].map(reserved or {}).fillna(0).astype(int)
+    out["reprint"] = (out["bring"] + out["reserved"] - out["stock"].clip(lower=0)).clip(lower=0)
     return out.sort_values(["reprint", "avg_per_event"], ascending=False)
 
 
@@ -235,6 +285,12 @@ def ai_brief(sales, items, events, deals, rules, artworks, currency, scope, requ
              "", "Events (date, revenue, pieces, orders, cost of goods, event costs, profit after all costs):"]
     lines += [f"- {r.event} ({r.date}): {r.revenue:.2f}, {r.sold}, {r.orders}, {r.goods:.2f}, {r.costs:.2f}, "
               f"{r.profit:.2f}" for r in by_event(sales, events, event_costs).itertuples()]
+    for name in events["name"]:
+        first, last = event_dates(events, name)
+        days = by_day(sales[sales["event"] == name], first)
+        if first != last and len(days) > 1:
+            lines.append(f"  {name} by day: " + ", ".join(f"{d.label} {d.revenue:.2f} ({d.orders} orders)"
+                                                         for d in days.itertuples()))
     lines += ["", "Sales by fandom x type (revenue, pieces):"]
     lines += [f"- {r.fandom} / {r.type}: {r.revenue:.2f}, {r.sold}"
               for r in fandom_by_type(sales, items).sort_values("revenue", ascending=False).itertuples()]
@@ -251,6 +307,9 @@ def ai_brief(sales, items, events, deals, rules, artworks, currency, scope, requ
     gifts = sales[sales["freebie"]]
     if not gifts.empty:
         lines += [f"Free gifts given: {int(gifts['qty'].sum())}"]
+    swaps = traded(sales)
+    if not swaps.empty:
+        lines += [f"Traded away with other artists (not sales): {int(swaps['qty'].sum())} pieces"]
     upcoming = events[events["date"] >= pd.Timestamp.today().strftime("%Y-%m-%d")]
     lines += ["", "Upcoming events: " + (", ".join(f"{e.name} ({e.date})" for e in upcoming.itertuples()) or "none")]
     if not artworks.empty:
