@@ -2,4 +2,6 @@ streamlit>=1.65
 pandas
 gspread>=6
 pillow
+openpyxl
+segno
 anthropic>=1.17

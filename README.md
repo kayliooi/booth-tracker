@@ -11,18 +11,25 @@ The menu at the top groups everything by when you use it. The app opens on **�
   - **📷 Item photos** (they show next to items on the Sell tab).
   - **🎉 Deals** like "any 3 Small stickers for $5"; a deal covers any mix of items of that type.
   - **🎁 Free gifts**: tick *Freebie* on items that can be given away and set rules like "spend $15 → 1 free gift". Tick **📎 Every order** on things that go into every bag (thank-you sticker, name card; untick *For sale*).
-- **📅 Events**: add events and see sales per event.
+  - **🖼️ Price list for your table**: download a printable page of everything for sale, grouped by type or fandom, with deals and photos. Open it and print or save as PDF.
+- **📝 Orders**: pre-orders and commissions: customer, contact, what, price, deposit, due date and collect-at event. Move them 📝 Taken → ✏️ Making → 📦 Ready, then tap how the balance was paid when collected; it's recorded as a sale (the deposit separately, so Cash up stays right). The Sell tab reminds you of orders ready to hand over at that event.
+- **📅 Events**: **⏰ Coming up** shows event days and apply-by / pay-by deadlines (warning within 7 days). Add events, keep the **📅 Convention calendar** (dates, status, deadlines, location), enter **💰 event costs** (table fee, travel, food...) and see sales, costs and profit per event.
 - **🧳 Packing**: a checklist of booth items that aren't for sale (tablecloth, stands, card reader...). "Add starter list" fills in common items; edit the list under "Edit kit list".
 
 ### 🛒 At the booth
-- **🛒 Sell**: pick the event, tap items to add them to the basket (filter by fandom), then **Complete sale**. Deals, free gifts and every-order items are applied automatically and stock goes down. Tap a basket line to take one out; use "Undo last sale" for mistakes.
+- **🛒 Sell**: pick the event, tap items to add them to the basket (🔍 search or filter by fandom), add a **🏷️ discount** if needed (friend, damaged, bundle...), then complete the sale by tapping how they paid: **💵 Cash**, **💳 Card** or **📱 QR**. Deals, free gifts and every-order items are applied automatically and stock goes down. Tap a basket line to take one out; use "Undo last sale" for mistakes.
+- **💬 Requests**: note what customers ask for (what to draw, fandom, merch type). Tap **➕1** when someone asks for the same thing. **📣 Share the idea page** gives you a link and QR code for the public idea page (below). In 🗓️ Prep → 🎨 Studio, *Customer requests* lists them most-asked first: **Make it an idea** adds it to your artworks, or dismiss it. Requests are also included in ✨ AI ideas.
+- **💵 Cash up**: end of the day, see takings by Cash / Card / QR, enter your starting float and the cash you counted, and it tells you if the cash box matches, is short or is over. Save the count to keep a record.
 - **🧳 Pack up**: at the end of the day, tick off the booth kit again so nothing is left behind.
 
 ### 📈 After
-- **📊 Sales**: totals by fandom and by item per event or overall, free gifts given, cost and profit, the full sales list, CSV download, remove a wrong sale (restores stock).
+- **📊 Sales**: totals by fandom and by item per event or overall, free gifts and discounts given, cost and profit, payment split, the full sales list, CSV download, a printable **📄 event report** (pick one event), remove a wrong sale (restores stock), and **💾 Backup all data** as one Excel file.
 - **📈 Insights**: average order, top fandoms, a fandom × product type heatmap (gaps = ideas), events compared and busiest hours.
 - **🔮 Restock**: what to bring / reprint for the next event (average sold per event + 25%), and a table of how each item is selling (sold, sell-through, sales, profit).
-- **✨ AI ideas** (optional): suggestions from Claude on what to draw next, stock, pricing and deals. Tap a quick question or type your own, for all events or one. Add `anthropic_api_key` to your secrets to turn it on; each request costs a few cents and sends a sales summary (no customer details) to Anthropic.
+- **✨ AI ideas** (optional): suggestions from Claude on what to draw next, stock, pricing and deals (tap a quick question or type your own, for all events or one), and **📣 Social post** captions (thank you, see you at, new merch, back in stock) with hashtags, 2 options each. Add `anthropic_api_key` to your secrets to turn it on; each request costs a few cents and sends a sales summary (no customer details) to Anthropic.
+
+### 🌐 Public idea page
+Your app link + `?page=ideas` (e.g. `https://your-app.streamlit.app/?page=ideas`) opens a page for customers and friends, **with no password**: they can suggest what you should draw (idea, fandom, merch type, optional @handle) and 👍 vote for the most-requested ideas. They see nothing else from the app. Ideas land in your 💬 Requests and 🎨 Studio → Customer requests, marked 🌐, with the @handles so you can tag people. Limits: 5 ideas and one vote per idea per visit. Change the page's title and text at the top of `app.py` (`IDEA_PAGE_TITLE`, `IDEA_PAGE_INTRO`). If the QR link looks wrong, set `public_url` in secrets to your app's address.
 
 Free gifts are recorded at $0. Photos (items and artworks) are stored as small 256 px thumbnails in the Google Sheet's `images` tab, so that tab looks like random text; that's normal.
 
@@ -40,7 +47,7 @@ Everything can be done in your phone's browser. Switch to **"Desktop site"** in 
 1. Go to sheets.google.com and create a blank sheet, e.g. "Booth Tracker".
 2. Copy its URL. You'll need it in step 4.
 
-The app creates the `items`, `events`, `sales`, `deals`, `freebie_rules`, `kit`, `packing`, `artworks`, `batches` and `images` tabs by itself.
+The app creates the `items`, `events`, `sales`, `deals`, `freebie_rules`, `kit`, `packing`, `artworks`, `batches`, `images`, `requests`, `event_costs`, `cashups` and `preorders` tabs by itself.
 
 ### 2. Give the app access to Google Sheets
 1. Go to console.cloud.google.com and create a new project (any name).
@@ -52,7 +59,7 @@ The app creates the `items`, `events`, `sales`, `deals`, `freebie_rules`, `kit`,
 
 ### 3. Put the code on GitHub
 1. On github.com, create a **new repository**. Set it to **Private**.
-2. Click **Add file → Upload files** and upload `app.py`, `storage.py`, `pricing.py`, `insights.py`, `requirements.txt`,
+2. Click **Add file → Upload files** and upload `app.py`, `storage.py`, `pricing.py`, `insights.py`, `reports.py`, `requirements.txt`,
    the `styles` folder and `.streamlit/config.toml` (keep it inside a `.streamlit` folder).
    Do **not** upload the `.json` key file or `secrets.toml`.
 

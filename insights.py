@@ -52,14 +52,31 @@ def fandom_by_type(sales, items):
     return p.groupby(["fandom", "type"], as_index=False).agg(revenue=("total", "sum"), sold=("qty", "sum"))
 
 
-def by_event(sales, events):
-    """Per event (oldest first): date, revenue, pieces sold, orders and average order."""
+def by_event(sales, events, event_costs=None):
+    """Per event (oldest first): date, revenue, pieces sold, orders, average order, and money.
+
+    goods = cost to make what left the table (free gifts included); costs = event costs (table fee,
+    travel...); profit = revenue - goods - costs.
+    """
     p = paid(sales)
     out = (p.groupby("event", as_index=False)
            .agg(revenue=("total", "sum"), sold=("qty", "sum"), orders=("order_id", "nunique")))
     out["avg_order"] = out["revenue"] / out["orders"]
     out["date"] = out["event"].map(dict(zip(events["name"], events["date"]))).fillna("")
+    goods = (sales["qty"] * sales["unit_cost"]).groupby(sales["event"]).sum()
+    out["goods"] = out["event"].map(goods).fillna(0.0)
+    costs = (event_costs.groupby("event")["amount"].sum() if event_costs is not None and not event_costs.empty
+             else pd.Series(dtype=float))
+    out["costs"] = out["event"].map(costs).fillna(0.0)
+    out["profit"] = out["revenue"] - out["goods"] - out["costs"]
     return out.sort_values("date")
+
+
+def by_payment(sales):
+    """Money and orders per payment method (blank = recorded before payment methods existed)."""
+    p = paid(sales)
+    return (p.assign(payment=p["payment"].replace("", "unknown"))
+            .groupby("payment", as_index=False).agg(revenue=("total", "sum"), orders=("order_id", "nunique")))
 
 
 def by_hour(sales):
@@ -106,6 +123,28 @@ def restock_forecast(sales, items, events, buffer=1.25):
     out = pd.DataFrame(rows).merge(items[["item_id", "name", "stock"]], on="item_id")
     out["reprint"] = (out["bring"] - out["stock"].clip(lower=0)).clip(lower=0)
     return out.sort_values(["reprint", "avg_per_event"], ascending=False)
+
+
+def group_requests(requests):
+    """Open customer requests grouped by what was asked (same subject + fandom + type, ignoring case).
+
+    Returns one row per request with: key, subject, fandom, type, asks, online (asks from the public idea
+    page), events, last asked, notes, contacts (names/@handles who asked), ids; most asked first.
+    """
+    cols = ["key", "subject", "fandom", "type", "asks", "online", "events", "last", "notes", "contacts", "ids"]
+    open_ = requests[requests["status"].isin(["", "open"])]
+    if open_.empty:
+        return pd.DataFrame(columns=cols)
+    open_ = open_.assign(key=open_["subject"].str.strip().str.lower() + "|" + open_["fandom"].str.strip().str.lower()
+                         + "|" + open_["type"].str.strip().str.lower()).sort_values("timestamp")
+    out = (open_.groupby("key", as_index=False, sort=False)
+           .agg(subject=("subject", "first"), fandom=("fandom", "first"), type=("type", "first"),
+                asks=("request_id", "count"), online=("source", lambda s: int((s == "online").sum())),
+                events=("event", lambda e: ", ".join(dict.fromkeys(x for x in e if x))),
+                last=("timestamp", "max"), notes=("notes", lambda n: "; ".join(dict.fromkeys(x for x in n if x))),
+                contacts=("contact", lambda c: ", ".join(dict.fromkeys(x for x in c if x))),
+                ids=("request_id", list)))
+    return out.sort_values(["asks", "last"], ascending=False)[cols]
 
 
 # ---- charts ----
@@ -178,13 +217,14 @@ items. Prices are in the currency shown.
 Reply in short Markdown for a phone screen, about 300-450 words, with these sections:
 ### What's working
 ### What to draw next
-(3-5 concrete artwork ideas: character + concept + product type, tied to what sells or to a gap)
+(3-5 concrete artwork ideas: character + concept + product type, tied to what sells, to a gap, or to
+customer requests - weigh requests by how often they were asked)
 ### Stock for the next event
 ### Pricing, deals & freebies
 ### One experiment to try"""
 
 
-def ai_brief(sales, items, events, deals, rules, artworks, currency, scope):
+def ai_brief(sales, items, events, deals, rules, artworks, currency, scope, requests=None, event_costs=None):
     """A compact text summary of the shop for the AI (no customer details are stored or sent)."""
     h = headline(sales)
     perf = item_performance(sales, items)
@@ -192,9 +232,9 @@ def ai_brief(sales, items, events, deals, rules, artworks, currency, scope):
              f"Revenue {h['revenue']:.2f}, orders {h['orders']}, pieces sold {h['items']}, "
              f"average order {h['avg_order']:.2f}, items per order {h['items_per_order']:.1f}, "
              f"cost of goods {h['cost']:.2f}, profit {h['profit']:.2f}.",
-             "", "Events (date, revenue, pieces, orders):"]
-    lines += [f"- {r.event} ({r.date}): {r.revenue:.2f}, {r.sold}, {r.orders}"
-              for r in by_event(sales, events).itertuples()]
+             "", "Events (date, revenue, pieces, orders, cost of goods, event costs, profit after all costs):"]
+    lines += [f"- {r.event} ({r.date}): {r.revenue:.2f}, {r.sold}, {r.orders}, {r.goods:.2f}, {r.costs:.2f}, "
+              f"{r.profit:.2f}" for r in by_event(sales, events, event_costs).itertuples()]
     lines += ["", "Sales by fandom x type (revenue, pieces):"]
     lines += [f"- {r.fandom} / {r.type}: {r.revenue:.2f}, {r.sold}"
               for r in fandom_by_type(sales, items).sort_values("revenue", ascending=False).itertuples()]
@@ -216,11 +256,16 @@ def ai_brief(sales, items, events, deals, rules, artworks, currency, scope):
     if not artworks.empty:
         lines += ["Artworks in progress: " + ", ".join(f"{a.title} [{a.fandom or '-'}, {a.stage}]"
                                                       for a in artworks.itertuples())]
+    if requests is not None:
+        asked = group_requests(requests)
+        if not asked.empty:
+            lines += ["", "Customer requests not made yet (what | fandom | merch type | times asked):"]
+            lines += [f"- {r.subject} | {r.fandom or '-'} | {r.type or '-'} | {r.asks}" for r in asked.itertuples()]
     return "\n".join(lines)
 
 
-def stream_suggestions(api_key, brief, question=""):
-    """Ask Claude for suggestions and yield the reply text as it arrives (for st.write_stream).
+def stream_claude(api_key, system, user_text):
+    """Send one message to Claude and yield the reply text as it arrives (for st.write_stream).
 
     Uses server-side fallbacks so a rare safety-classifier false positive is retried on another
     model instead of failing; a refusal or a cut-off reply is reported at the end.
@@ -228,15 +273,14 @@ def stream_suggestions(api_key, brief, question=""):
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
-    ask = question.strip() or "What should I focus on next?"
     with client.beta.messages.stream(
         model=AI_MODEL,
         max_tokens=8000,
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
         output_config={"effort": "medium"},
-        system=AI_SYSTEM,
-        messages=[{"role": "user", "content": f"<shop_summary>\n{brief}\n</shop_summary>\n\n{ask}"}],
+        system=system,
+        messages=[{"role": "user", "content": user_text}],
     ) as stream:
         yield from stream.text_stream
         final = stream.get_final_message()
@@ -244,3 +288,52 @@ def stream_suggestions(api_key, brief, question=""):
         yield "\n\n_Claude declined to answer this one. Try rephrasing your question._"
     elif final.stop_reason == "max_tokens":
         yield "\n\n_(The answer was cut off.)_"
+
+
+def stream_suggestions(api_key, brief, question=""):
+    """Ask Claude for business suggestions based on the shop summary."""
+    ask = question.strip() or "What should I focus on next?"
+    yield from stream_claude(api_key, AI_SYSTEM, f"<shop_summary>\n{brief}\n</shop_summary>\n\n{ask}")
+
+
+# ---- AI social posts ----
+POST_KINDS = {
+    "thanks": "🙏 Thank you after an event",
+    "coming": "📣 See you at an upcoming event",
+    "new": "✨ New merch announcement",
+    "restock": "📦 Back in stock",
+}
+POST_SYSTEM = """You write social media captions for an independent artist who sells fan-art merch \
+(stickers, prints) at conventions in Southeast Asia. Write in their voice: warm, excited, casual, a \
+little playful, never salesy or corporate. Use a few fitting emoji. Only mention facts given to you \
+(events, dates, items, prices); never invent details. Don't mention sales numbers or money earned.
+
+Reply with exactly 2 alternative captions in Markdown, each under a short "### Option 1" / \
+"### Option 2" heading, each ready to copy: the caption, then a line of 8-12 relevant hashtags \
+(fandoms, product types, the event, art/convention tags). Keep each caption under 120 words."""
+
+
+def post_brief(kind, platform, details, events, items, sales, event=None):
+    """The facts for a social post: what kind, which platform, the event and the merch to feature."""
+    lines = [f"Post type: {POST_KINDS[kind]}", f"Platform: {platform}"]
+    if event:
+        e = events[events["name"] == event]
+        if not e.empty:
+            e = e.iloc[0]
+            lines.append(f"Event: {event}" + (f", {e['date']}" if e["date"] else "")
+                         + (f", at {e['location']}" if e.get("location") else ""))
+        if kind == "thanks":
+            best = item_performance(sales[sales["event"] == event], items).query("sold > 0").head(3)
+            if not best.empty:
+                lines.append("Crowd favourites at this event: " + ", ".join(best["name"]))
+    on_sale = items[items["active"] & (items["stock"] > 0)]
+    lines.append("Merch available (name | fandom | price): " + "; ".join(
+        f"{r.name} | {r.fandom or '-'} | {r.price:.2f}" for r in on_sale.itertuples()))
+    if details.strip():
+        lines.append(f"Extra details from the artist: {details.strip()}")
+    return "\n".join(lines)
+
+
+def stream_post(api_key, brief):
+    """Ask Claude for two caption options for a social post."""
+    yield from stream_claude(api_key, POST_SYSTEM, f"<post_facts>\n{brief}\n</post_facts>\n\nWrite the captions.")

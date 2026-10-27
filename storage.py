@@ -16,18 +16,32 @@ TABLES = {
     # unit_cost = what one piece cost to make (average over received batches)
     "items": ["item_id", "fandom", "type", "name", "price", "stock", "active", "freebie", "every_order",
               "unit_cost"],
-    "events": ["event_id", "name", "date"],
+    # date = event day; apply_by / pay_by = convention deadlines; status: interested/applied/accepted/paid/rejected
+    "events": ["event_id", "name", "date", "location", "status", "apply_by", "pay_by", "notes"],
+    # pre-orders (of an existing item) and commissions taken from customers; the full price is
+    # recorded as a sale when collected. status: taken/making/ready/collected/cancelled
+    "preorders": ["preorder_id", "created", "kind", "customer", "contact", "description", "item_id", "qty",
+                  "price", "deposit", "due", "collect_event", "status", "notes"],
     # one row per item sold; items bought together share an order_id. Free gifts have
     # freebie = TRUE and total 0 (unit_price keeps the normal price). unit_cost is copied
     # from the item at the time of sale, for profit.
     "sales": ["sale_id", "order_id", "timestamp", "event", "item_id", "item", "fandom",
-              "qty", "unit_price", "total", "freebie", "unit_cost"],
+              "qty", "unit_price", "total", "freebie", "unit_cost", "payment", "discount", "discount_reason"],
+    # money spent to do an event (table fee, travel, food...), for profit after costs
+    "event_costs": ["cost_id", "event", "category", "amount", "note"],
+    # end-of-day cash counts: expected = float + cash sales; difference = counted - expected
+    "cashups": ["cashup_id", "timestamp", "event", "float", "cash_sales", "counted", "difference"],
     # drawings from idea to finished art (stage: idea/sketch/colour/shade/done)
     "artworks": ["art_id", "title", "fandom", "stage", "target_event", "notes", "link", "created"],
     # production runs: art_id is blank for reprints; item_id is filled in once received
     # method: order (from a printer) or self (print myself); status follows that method's steps
     "batches": ["batch_id", "art_id", "item_id", "name", "fandom", "type", "price", "qty", "cost",
                 "vendor", "method", "status", "created", "received"],
+    # what customers asked for, one row per ask (asking again / voting = another row);
+    # status: open, idea (turned into an artwork, art_id set) or dismissed;
+    # source: booth (typed in at the booth) or online (the public idea page); contact: optional name/@handle
+    "requests": ["request_id", "timestamp", "event", "subject", "fandom", "type", "notes", "status", "art_id",
+                 "source", "contact"],
     # one small JPEG thumbnail per item or artwork (owner_id = item_id or art_id), base64 text
     # so it fits in a single Google Sheets cell (max 50,000 characters)
     "images": ["owner_id", "data", "updated"],
@@ -69,6 +83,16 @@ def _coerce(table, df):
         df["total"] = _num(df["total"]).fillna(0.0).astype(float)
         df["freebie"] = _bool(df["freebie"])
         df["unit_cost"] = _num(df["unit_cost"]).fillna(0.0).astype(float)
+        df["discount"] = _num(df["discount"]).fillna(0.0).astype(float)
+    elif table == "preorders":
+        df["qty"] = _num(df["qty"]).fillna(1).astype(int)
+        df["price"] = _num(df["price"]).fillna(0.0).astype(float)
+        df["deposit"] = _num(df["deposit"]).fillna(0.0).astype(float)
+    elif table == "event_costs":
+        df["amount"] = _num(df["amount"]).fillna(0.0).astype(float)
+    elif table == "cashups":
+        for col in ("float", "cash_sales", "counted", "difference"):
+            df[col] = _num(df[col]).fillna(0.0).astype(float)
     elif table == "batches":
         df["price"] = _num(df["price"]).fillna(0.0).astype(float)
         df["qty"] = _num(df["qty"]).fillna(0).astype(int)
