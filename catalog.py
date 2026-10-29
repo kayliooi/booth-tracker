@@ -102,9 +102,10 @@ def _card(draw, canvas, box, item, photo_b64, currency):
 
 def catalog_pages(items, deals, photos, currency, title, subtitle="", footer="", fmt="post", group_by="type",
                   avatar_png=None, hide_sold_out=True):
-    """Catalog images as PNG bytes, one page per group (type or fandom), split when a group is long.
+    """Catalog images as PNG bytes, one page per group (type, fandom or theme), split when a group is long.
 
     items/deals: DataFrames from storage; photos: {item_id: base64 JPEG}; avatar_png: PNG bytes or None.
+    By theme, an item with two themes is in both collections and untagged items are left out.
     """
     width, height = SIZES[fmt]
     cols, rows = (2, 2) if fmt == "post" else (2, 3)
@@ -114,7 +115,10 @@ def catalog_pages(items, deals, photos, currency, title, subtitle="", footer="",
     deal_text = {}
     for d in deals.itertuples():
         deal_text.setdefault(d.type, []).append(f"{d.qty} for {currency}{d.price:,.2f}")
-    key = "type" if group_by == "type" else "fandom"
+    key = group_by if group_by in ("type", "theme") else "fandom"
+    if key == "theme":
+        shown = (shown.assign(theme=[[t.strip() for t in str(c).split(",") if t.strip()] for c in shown["themes"]])
+                 .explode("theme").dropna(subset=["theme"]))
 
     pages = []
     for group, rows_df in shown.sort_values([key, "name"]).groupby(key, sort=False):

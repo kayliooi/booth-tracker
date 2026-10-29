@@ -47,6 +47,21 @@ h1, h2, h3 {
     -webkit-text-fill-color: #9A8BB5 !important;
 }
 
+/* multi-choice box (e.g. items in a pre-order): white box, violet chips */
+[data-testid="stMultiSelect"] div[role="group"] {
+    background: #FFFFFF;
+    border-color: #D8C8FF;
+}
+
+[data-testid="stMultiSelect"] span[role="group"] > span {
+    background: #7C3AED !important;
+    color: #FFFFFF !important;
+}
+
+[data-testid="stMultiSelect"] span[role="group"] svg {
+    color: #FFFFFF;
+}
+
 /* outlines of boxes (basket, cards), expanders and forms: lilac in light and dark mode */
 .stApp [data-testid="stVerticalBlock"],
 .stApp [data-testid="stExpander"] details,
@@ -146,6 +161,27 @@ button[data-variant="pills"][aria-checked="true"] > div {
     background: #7C3AED !important;
     border-color: #7C3AED !important;
     color: #FFFFFF !important;
+}
+
+/* Segmented choice (idea page: Suggest an idea / Ask for a commission): same look as the pills */
+button[data-variant="segmented_control"] {
+    background: #FFFFFF;
+    border-color: #D8C8FF;
+    color: #2E1A47;
+    min-height: 2.75rem;
+}
+
+button[data-variant="segmented_control"]:hover {
+    border-color: #7C3AED;
+    color: #7C3AED;
+}
+
+button[data-variant="segmented_control"][aria-checked="true"],
+button[data-variant="segmented_control"][aria-checked="true"] > div {
+    background: #7C3AED !important;
+    border-color: #7C3AED !important;
+    color: #FFFFFF !important;
+    font-weight: 600;
 }
 
 /* Main menu (Before / At the booth / After): full width, bigger than the filter pills */

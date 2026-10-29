@@ -14,15 +14,19 @@ TABLES = {
     # active = for sale on the Sell tab; freebie = can be chosen as a free gift;
     # every_order = added free to every order automatically (thank-you sticker, name card)
     # unit_cost = what one piece cost to make (average over received batches)
+    # themes = theme names from the "themes" table, comma-separated (e.g. "Xmas, Couple")
     "items": ["item_id", "fandom", "type", "name", "price", "stock", "active", "freebie", "every_order",
-              "unit_cost"],
+              "unit_cost", "themes"],
     # date = (first) event day; end_date = last day for multi-day events (blank = one day);
     # apply_by / pay_by = convention deadlines; status: interested/applied/accepted/paid/rejected
     "events": ["event_id", "name", "date", "location", "status", "apply_by", "pay_by", "notes", "end_date"],
     # pre-orders (of an existing item) and commissions taken from customers; the full price is
-    # recorded as a sale when collected. status: taken/making/ready/collected/cancelled
+    # recorded as a sale when collected. status: taken/making/ready/collected/cancelled, or
+    # request/declined for commission requests sent from the public page (voter = that phone's cookie id)
     "preorders": ["preorder_id", "created", "kind", "customer", "contact", "description", "item_id", "qty",
-                  "price", "deposit", "due", "collect_event", "status", "notes"],
+                  "price", "deposit", "due", "collect_event", "status", "notes", "voter"],
+    # the items in a pre-order (several per order); older orders kept a single item in preorders.item_id
+    "preorder_lines": ["preorder_id", "item_id", "qty"],
     # one row per item sold; items bought together share an order_id. Free gifts have
     # freebie = TRUE and total 0 (unit_price keeps the normal price). unit_cost is copied
     # from the item at the time of sale, for profit.
@@ -37,17 +41,21 @@ TABLES = {
     "promo_tasks": ["task_id", "task", "hint"],
     # end-of-day cash counts: expected = float + cash sales; difference = counted - expected
     "cashups": ["cashup_id", "timestamp", "event", "float", "cash_sales", "counted", "difference"],
-    # drawings from idea to finished art (stage: idea/sketch/colour/shade/done)
-    "artworks": ["art_id", "title", "fandom", "stage", "target_event", "notes", "link", "created"],
+    # drawings from idea to finished art (stage: idea/sketch/colour/shade/done); themes as on items
+    "artworks": ["art_id", "title", "fandom", "stage", "target_event", "notes", "link", "created", "themes"],
+    # theme tags for items and artworks: festive (with months, e.g. Xmas Dec-Dec, CNY Jan-Feb) or all-year
+    # (blank months, e.g. Gym, Couple); from_month / to_month are "Jan".."Dec"
+    "themes": ["name", "emoji", "from_month", "to_month"],
     # production runs: art_id is blank for reprints; item_id is filled in once received
     # method: order (from a printer) or self (print myself); status follows that method's steps
     "batches": ["batch_id", "art_id", "item_id", "name", "fandom", "type", "price", "qty", "cost",
                 "vendor", "method", "status", "created", "received"],
     # what customers asked for, one row per ask (asking again / voting = another row);
     # status: open, idea (turned into an artwork, art_id set) or dismissed;
-    # source: booth (typed in at the booth) or online (the public idea page); contact: optional name/@handle
+    # source: booth (typed in at the booth) or online (the public idea page); contact: optional name/@handle;
+    # voter: random id from a cookie on the visitor's phone, so one phone gets one vote per idea
     "requests": ["request_id", "timestamp", "event", "subject", "fandom", "type", "notes", "status", "art_id",
-                 "source", "contact"],
+                 "source", "contact", "voter"],
     # one small JPEG thumbnail per item or artwork (owner_id = item_id or art_id), base64 text
     # so it fits in a single Google Sheets cell (max 50,000 characters)
     "images": ["owner_id", "data", "updated"],
@@ -59,6 +67,11 @@ TABLES = {
     "kit": ["kit_id", "category", "name", "qty", "notes"],
     # checklist ticks per event: packed = before leaving, returned = packed up at the end
     "packing": ["event", "kit_id", "packed", "returned"],
+    # what you offer as commissions on the idea page, e.g. Square print / 400 × 400 px / from 15;
+    # open = shown to visitors (untick to pause one); price_from 0 = no price shown
+    "commission_options": ["name", "details", "price_from", "open"],
+    # switches you change in the app, e.g. commissions_open = TRUE/FALSE
+    "settings": ["key", "value"],
 }
 
 
@@ -94,6 +107,8 @@ def _coerce(table, df):
         df["qty"] = _num(df["qty"]).fillna(1).astype(int)
         df["price"] = _num(df["price"]).fillna(0.0).astype(float)
         df["deposit"] = _num(df["deposit"]).fillna(0.0).astype(float)
+    elif table == "preorder_lines":
+        df["qty"] = _num(df["qty"]).fillna(1).astype(int)
     elif table == "trades":
         df["value"] = _num(df["value"]).fillna(0.0).astype(float)
     elif table == "event_costs":
@@ -111,6 +126,9 @@ def _coerce(table, df):
     elif table == "deals":
         df["qty"] = _num(df["qty"]).fillna(0).astype(int)
         df["price"] = _num(df["price"]).fillna(0.0).astype(float)
+    elif table == "commission_options":
+        df["price_from"] = _num(df["price_from"]).fillna(0.0).astype(float)
+        df["open"] = _bool(df["open"])
     elif table == "kit":
         df["qty"] = _num(df["qty"]).fillna(1).astype(int)
     elif table == "packing":
@@ -122,6 +140,9 @@ def _coerce(table, df):
     if table == "sales":
         # sales from before baskets existed are each their own order
         df["order_id"] = df["order_id"].where(df["order_id"] != "", df["sale_id"])
+    # every decimal column is money: keep 2 decimals, so the sheet never shows 1.6666667 or 0.30000000000000004
+    for col in df.select_dtypes("float").columns:
+        df[col] = df[col].round(2)
     return df
 
 
@@ -167,7 +188,9 @@ class SheetsStore:
         """Log in with the service account `creds` (dict from secrets) and open the sheet at `spreadsheet_url`."""
         import gspread
         self._gspread = gspread
-        self.sh = gspread.service_account_from_dict(dict(creds)).open_by_url(spreadsheet_url)
+        # BackOffHTTPClient waits and retries when Google says "too many requests" (60 writes a minute)
+        client = gspread.service_account_from_dict(dict(creds), http_client=gspread.BackOffHTTPClient)
+        self.sh = client.open_by_url(spreadsheet_url)
         self._ws = {}
 
     def _sheet(self, table):

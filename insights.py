@@ -142,25 +142,124 @@ def item_performance(sales, items):
     return out.sort_values(["sold", "revenue"], ascending=False)
 
 
+# ---- themes and seasons ----
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def tags(text):
+    """Theme names from a comma-separated cell, e.g. "Xmas, Couple" -> ["Xmas", "Couple"]."""
+    return [t.strip() for t in str(text or "").split(",") if t.strip()]
+
+
+def is_festive(theme):
+    """True for a theme with a season (from/to month set), e.g. Xmas; False for all-year ones like Gym."""
+    return theme["from_month"] in MONTHS and theme["to_month"] in MONTHS
+
+
+def season(theme, day):
+    """The current or next season of a festive theme as (first day, last day) dates, seen from `day`.
+
+    Seasons are whole months and can wrap past New Year (e.g. Dec-Jan). None for all-year themes.
+    """
+    if not is_festive(theme):
+        return None
+    m1, m2 = MONTHS.index(theme["from_month"]) + 1, MONTHS.index(theme["to_month"]) + 1
+    for year in (day.year - 1, day.year, day.year + 1):
+        start = pd.Timestamp(year=year, month=m1, day=1)
+        end = (pd.Timestamp(year=year + (m2 < m1), month=m2, day=1) + pd.offsets.MonthEnd(0))
+        if end.date() >= day:
+            return start.date(), end.date()
+    return None
+
+
+def season_status(themes, day, soon_days=70):
+    """Festive themes that are in season on `day` or start within `soon_days`, soonest first.
+
+    One dict per theme: name, emoji, start, end, now (in season), days (until it starts; 0 when now).
+    """
+    out = []
+    for t in themes.to_dict("records"):
+        found = season(t, day)
+        if found:
+            start, end = found
+            days = max((start - day).days, 0)
+            if days <= soon_days:
+                out.append({**t, "start": start, "end": end, "now": start <= day, "days": days})
+    return sorted(out, key=lambda s: s["days"])
+
+
+def off_season_items(items, themes, day, lead_days=45):
+    """Item ids whose festive themes are all out of season on `day` (and not starting within `lead_days`).
+
+    Items without festive themes (untagged, or only all-year themes like Gym) are never off-season.
+    """
+    festive = {t["name"]: t for t in themes.to_dict("records") if is_festive(t)}
+    off = set()
+    for item_id, cell in zip(items["item_id"], items["themes"]):
+        mine = [festive[t] for t in tags(cell) if t in festive]
+        if mine and all((season(t, day)[0] - day).days > lead_days for t in mine):
+            off.add(item_id)
+    return off
+
+
+def _theme_rows(sales, items):
+    """Paid sales rows, one per theme of the item sold (in a "theme" column); untagged items left out.
+
+    Themes come from the item now, so tagging an item also counts its earlier sales.
+    """
+    p = paid(sales)
+    item_tags = {i: tags(t) for i, t in zip(items["item_id"], items["themes"])}
+    return (p.assign(theme=p["item_id"].map(item_tags), fandom=p["fandom"].replace("", "Other"))
+            .explode("theme").dropna(subset=["theme"]))
+
+
+def by_theme(sales, items):
+    """Revenue and pieces sold per theme, biggest first (an item with two themes counts in both)."""
+    return (_theme_rows(sales, items).groupby("theme", as_index=False)
+            .agg(revenue=("total", "sum"), sold=("qty", "sum")).sort_values("revenue", ascending=False))
+
+
+def fandom_by_theme(sales, items):
+    """Revenue and pieces sold for every fandom x theme that sold something."""
+    return (_theme_rows(sales, items).groupby(["fandom", "theme"], as_index=False)
+            .agg(revenue=("total", "sum"), sold=("qty", "sum")))
+
+
 OPEN_ORDER_STATUSES = ("taken", "making", "ready")
 
 
-def reserved_stock(preorders):
+def order_lines(preorders, lines=None):
+    """Every pre-order's items as rows of preorder_id, item_id, qty.
+
+    New orders keep their items in the "preorder_lines" table; older single-item orders kept one item in
+    preorders.item_id, which is used when an order has no lines. Commissions have no lines.
+    """
+    lines = lines if lines is not None else pd.DataFrame(columns=["preorder_id", "item_id", "qty"])
+    older = preorders[(preorders["item_id"] != "") & ~preorders["preorder_id"].isin(lines["preorder_id"])]
+    return pd.concat([lines[["preorder_id", "item_id", "qty"]], older[["preorder_id", "item_id", "qty"]]],
+                     ignore_index=True)
+
+
+def reserved_stock(preorders, lines=None):
     """Pieces of existing items promised to open pre-orders: {item_id: qty}. Not for sale at the booth."""
-    open_ = preorders[preorders["status"].isin(OPEN_ORDER_STATUSES) & (preorders["item_id"] != "")]
-    return open_.groupby("item_id")["qty"].sum().astype(int).to_dict()
+    open_ids = preorders.loc[preorders["status"].isin(OPEN_ORDER_STATUSES), "preorder_id"]
+    held = order_lines(preorders, lines)
+    held = held[held["preorder_id"].isin(open_ids) & (held["item_id"] != "")]
+    return held.groupby("item_id")["qty"].sum().astype(int).to_dict()
 
 
-def restock_forecast(sales, items, events, buffer=1.25, reserved=None):
+def restock_forecast(sales, items, events, buffer=1.25, reserved=None, off_season=frozenset()):
     """A simple "what to bring next time" guess per item that has sold before.
 
     Average pieces sold per event (counting events from the item's first sale onwards), plus a
     25% buffer, compared with stock on hand minus pieces reserved for pre-orders ({item_id: qty}).
+    Items in `off_season` (ids, see off_season_items) get no reprint suggestion, only their reserved pieces.
     It's an average of the past, not a guarantee.
     """
     p = paid(sales)
     if p.empty:
-        return pd.DataFrame(columns=["name", "avg_per_event", "bring", "stock", "reserved", "reprint"])
+        return pd.DataFrame(columns=["name", "avg_per_event", "bring", "stock", "reserved", "reprint",
+                                     "off_season"])
     dates = dict(zip(events["name"], events["date"]))
     sale_dates = sorted({dates.get(e, "") for e in p["event"].unique()})
     rows = []
@@ -171,8 +270,19 @@ def restock_forecast(sales, items, events, buffer=1.25, reserved=None):
         rows.append({"item_id": item_id, "avg_per_event": avg, "bring": math.ceil(avg * buffer)})
     out = pd.DataFrame(rows).merge(items[["item_id", "name", "stock"]], on="item_id")
     out["reserved"] = out["item_id"].map(reserved or {}).fillna(0).astype(int)
-    out["reprint"] = (out["bring"] + out["reserved"] - out["stock"].clip(lower=0)).clip(lower=0)
+    out["off_season"] = out["item_id"].isin(off_season)
+    bring = out["bring"].where(~out["off_season"], 0)
+    out["reprint"] = (bring + out["reserved"] - out["stock"].clip(lower=0)).clip(lower=0)
     return out.sort_values(["reprint", "avg_per_event"], ascending=False)
+
+
+def request_key(subject, fandom, mtype):
+    """Grouping key for requests asking for the same thing (subject|fandom|type, ignoring case and spaces).
+
+    Works on single strings or on whole columns (pandas Series).
+    """
+    norm = (lambda s: s.str.strip().str.lower()) if isinstance(subject, pd.Series) else (lambda s: s.strip().lower())
+    return norm(subject) + "|" + norm(fandom) + "|" + norm(mtype)
 
 
 def group_requests(requests):
@@ -185,11 +295,11 @@ def group_requests(requests):
     open_ = requests[requests["status"].isin(["", "open"])]
     if open_.empty:
         return pd.DataFrame(columns=cols)
-    open_ = open_.assign(key=open_["subject"].str.strip().str.lower() + "|" + open_["fandom"].str.strip().str.lower()
-                         + "|" + open_["type"].str.strip().str.lower()).sort_values("timestamp")
+    open_ = open_.assign(key=request_key(open_["subject"], open_["fandom"], open_["type"])).sort_values("timestamp")
     out = (open_.groupby("key", as_index=False, sort=False)
            .agg(subject=("subject", "first"), fandom=("fandom", "first"), type=("type", "first"),
-                asks=("request_id", "count"), online=("source", lambda s: int((s == "online").sum())),
+                asks=("request_id", "count"),
+                online=("source", lambda s: int(s.str.startswith("online").sum())),     # ideas + 👍 votes
                 events=("event", lambda e: ", ".join(dict.fromkeys(x for x in e if x))),
                 last=("timestamp", "max"), notes=("notes", lambda n: "; ".join(dict.fromkeys(x for x in n if x))),
                 contacts=("contact", lambda c: ", ".join(dict.fromkeys(x for x in c if x))),
@@ -229,15 +339,19 @@ def bar_chart(df, category, value, currency, value_title, order=None):
     return _style(chart)
 
 
-def heatmap(df, currency):
-    """Fandom x product type grid, darker = more sales. Gaps between cells in the page colour."""
+def heatmap(df, currency, column="type"):
+    """Fandom x product type (or x theme, column="theme") grid, darker = more sales.
+
+    Gaps between cells in the page colour.
+    """
     chart = (alt.Chart(df).mark_rect(cornerRadius=4, stroke="#F7F3FF", strokeWidth=2)
-             .encode(x=alt.X("type:N", title=None, axis=alt.Axis(labelAngle=-35, labelLimit=100)),
+             .encode(x=alt.X(f"{column}:N", title=None, axis=alt.Axis(labelAngle=-35, labelLimit=100)),
                      y=alt.Y("fandom:N", title=None),
                      color=alt.Color("revenue:Q", title=f"Sales ({currency})",
                                      scale=alt.Scale(range=HEAT),
                                      legend=alt.Legend(orient="bottom", gradientLength=180)),
-                     tooltip=[alt.Tooltip("fandom:N", title="Fandom"), alt.Tooltip("type:N", title="Type"),
+                     tooltip=[alt.Tooltip("fandom:N", title="Fandom"),
+                              alt.Tooltip(f"{column}:N", title=column.title()),
                               alt.Tooltip("revenue:Q", title=f"Sales ({currency})", format=",.2f"),
                               alt.Tooltip("sold:Q", title="Pieces sold")])
              .properties(height=alt.Step(36)))                 # 36 px per fandom row
@@ -262,7 +376,9 @@ You get a summary of their sales, stock, deals, free gifts and the artworks they
 
 Give advice grounded in their numbers. When there is little data (few events or sales), say how \
 confident you are and keep suggestions small and testable. Name specific fandoms, product types and \
-items. Prices are in the currency shown.
+items. Prices are in the currency shown. Items and artworks can have theme tags: festive themes with a \
+season (e.g. CNY, Halloween, Xmas) and all-year ones (e.g. Gym, Couple). Use upcoming seasons when \
+suggesting what to draw and bring, allowing a few weeks to draw and print.
 
 Reply in short Markdown for a phone screen, about 300-450 words, with these sections:
 ### What's working
@@ -274,7 +390,8 @@ customer requests - weigh requests by how often they were asked)
 ### One experiment to try"""
 
 
-def ai_brief(sales, items, events, deals, rules, artworks, currency, scope, requests=None, event_costs=None):
+def ai_brief(sales, items, events, deals, rules, artworks, currency, scope, requests=None, event_costs=None,
+             themes=None):
     """A compact text summary of the shop for the AI (no customer details are stored or sent)."""
     h = headline(sales)
     perf = item_performance(sales, items)
@@ -294,10 +411,25 @@ def ai_brief(sales, items, events, deals, rules, artworks, currency, scope, requ
     lines += ["", "Sales by fandom x type (revenue, pieces):"]
     lines += [f"- {r.fandom} / {r.type}: {r.revenue:.2f}, {r.sold}"
               for r in fandom_by_type(sales, items).sort_values("revenue", ascending=False).itertuples()]
-    lines += ["", "Items (fandom | type | name | price | sold | stock left | sell-through | profit):"]
+    lines += ["", "Items (fandom | type | themes | name | price | sold | stock left | sell-through | profit):"]
     prices = dict(zip(items["item_id"], items["price"]))
-    lines += [f"- {r.fandom or '-'} | {r.type or '-'} | {r.name} | {prices.get(r.item_id, 0):.2f} | {r.sold} | "
-              f"{r.stock} | {r.sell_through:.0%} | {r.profit:.2f}" for r in perf.itertuples()]
+    item_themes = dict(zip(items["item_id"], items["themes"]))
+    lines += [f"- {r.fandom or '-'} | {r.type or '-'} | {item_themes.get(r.item_id) or '-'} | {r.name} | "
+              f"{prices.get(r.item_id, 0):.2f} | {r.sold} | {r.stock} | {r.sell_through:.0%} | {r.profit:.2f}"
+              for r in perf.itertuples()]
+    if themes is not None and not themes.empty:
+        lines += ["", "Themes (season months or all-year): " + ", ".join(
+            f"{t.name} ({t.from_month}-{t.to_month})" if is_festive(t._asdict()) else f"{t.name} (all-year)"
+            for t in themes.itertuples())]
+        theme_sales = by_theme(sales, items)
+        if not theme_sales.empty:
+            lines += ["Sales by theme (revenue, pieces): " + ", ".join(
+                f"{r.theme} {r.revenue:.2f} ({r.sold})" for r in theme_sales.itertuples())]
+        coming = season_status(themes, pd.Timestamp.today().date(), soon_days=120)
+        if coming:
+            lines += ["Seasons now or coming up: " + ", ".join(
+                f"{s['name']} (now, until {s['end']})" if s["now"] else f"{s['name']} (starts {s['start']})"
+                for s in coming)]
     hours = by_hour(sales)
     if not hours.empty:
         lines += ["", "Orders by hour: " + ", ".join(f"{r.hour}:00={r.orders}" for r in hours.itertuples())]
@@ -313,8 +445,9 @@ def ai_brief(sales, items, events, deals, rules, artworks, currency, scope, requ
     upcoming = events[events["date"] >= pd.Timestamp.today().strftime("%Y-%m-%d")]
     lines += ["", "Upcoming events: " + (", ".join(f"{e.name} ({e.date})" for e in upcoming.itertuples()) or "none")]
     if not artworks.empty:
-        lines += ["Artworks in progress: " + ", ".join(f"{a.title} [{a.fandom or '-'}, {a.stage}]"
-                                                      for a in artworks.itertuples())]
+        lines += ["Artworks in progress: " + ", ".join(
+            f"{a.title} [{a.fandom or '-'}, {a.stage}" + (f", {a.themes}" if a.themes else "") + "]"
+            for a in artworks.itertuples())]
     if requests is not None:
         asked = group_requests(requests)
         if not asked.empty:

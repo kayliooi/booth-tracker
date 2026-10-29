@@ -23,12 +23,34 @@ TIMEZONE = "Asia/Singapore"
 LOW_STOCK = 3          # warn when stock is at or below this
 # how customers can pay: key saved in the sheet -> button label
 PAYMENTS = {"cash": "💵 Cash", "card": "💳 Card", "qr": "📱 QR"}
+ORDER_KINDS = ["🛍️ Pre-order", "🎨 Commission"]
+# theme tags until you edit the list in ⚙️ Settings → 🏷️ Themes: (name, emoji, from month, to month);
+# festive themes have months (their season), all-year ones leave them blank
+THEME_STARTER = [("CNY", "🧧", "Jan", "Feb"), ("Halloween", "🎃", "Oct", "Oct"), ("Xmas", "🎄", "Dec", "Dec"),
+                 ("Gym", "💪", "", ""), ("Couple", "💕", "", ""), ("Work", "💼", "", "")]
+# festive days on the Singapore / SEA calendar, added with "Add festive themes from the calendar" in Settings.
+# Hari Raya moves about 11 days earlier each year (Feb-Mar around 2027-2029), and CNY, Easter, Mid-Autumn
+# and Deepavali shift by a few weeks, so check their months each year. Summer matsuri = Tanabata / Japanese
+# summer festivals; Graduation = Singapore university convocations (mostly July).
+HOLIDAY_THEMES = [("Valentine's", "💝", "Feb", "Feb"), ("Hari Raya", "🌙", "Feb", "Mar"),
+                  ("Easter", "🐣", "Mar", "Apr"), ("Mother's Day", "💐", "May", "May"),
+                  ("Father's Day", "👔", "Jun", "Jun"), ("Summer matsuri", "🎐", "Jul", "Jul"),
+                  ("Graduation", "🎓", "Jul", "Jul"), ("National Day", "🇸🇬", "Aug", "Aug"),
+                  ("Mid-Autumn", "🥮", "Sep", "Sep"), ("Deepavali", "🪔", "Oct", "Nov")]
+SEASON_HEADS_UP_DAYS = 70  # festive season reminders start this many days (10 weeks) before
 COST_CATEGORIES = ["Table fee", "Travel", "Food", "Parking", "Accommodation", "Supplies", "Other"]
 # public idea page (your app link + ?page=ideas): what visitors see
 IDEA_PAGE_TITLE = "✨ Help Kay-chan pick the next sticker!"
 IDEA_PAGE_INTRO = ("Which character or fandom would you love as a sticker or print? "
                    "Send Kay-chan your idea, or vote for one below. Popular ideas get drawn first!")
 IDEA_PAGE_LIMIT = 5        # ideas one visitor can send per visit
+# commission requests on the same page (turn them on/off in 🗓️ Prep → 📝 Orders); private, never shown to others
+COMMISSION_INTRO = ("Want something just for you, like your favourite characters from two fandoms together, "
+                    "or your OC? Tell Kay-chan about it. Only Kay-chan sees this, and will reply to you "
+                    "with a price before anything is made.")
+# what you offer until you edit the list in ⚙️ Settings → 🎨 Commission options: (name, details, price from (0 = not shown), open)
+COMMISSION_STARTER = [("Square print", "400 × 400 px", 0.0, True)]
+COMMISSION_LIMIT = 2       # commission requests one phone can send per day
 
 # booth kit suggestions, added with "Add starter list" on the Kit tab: (category, name, qty, notes)
 KIT_STARTER = [
@@ -82,7 +104,6 @@ ICON = Path(__file__).parent / "assets" / "icon.png"      # round avatar: tab ic
 st.set_page_config(page_title="Booth Tracker", page_icon=str(ICON) if ICON.exists() else "🎨", layout="centered")
 st.html(f"<style>{(Path(__file__).parent / 'styles' / 'app.css').read_text(encoding='utf-8')}</style>")
 
-
 def header(title, size=56):
     """The page title with the round avatar beside it (or a 🎨 when assets/icon.png is missing)."""
     if not ICON.exists():
@@ -108,46 +129,142 @@ def _secret(key):
 
 # ---- storage ----
 @st.cache_resource
-def get_store():
-    """Connect to the Google Sheet if secrets are set, otherwise use local CSV files in data/.
+def get_store(mode="live"):
+    """The data for `mode`: "live" (your real data) or "test" (🧪 Test mode, to try things out).
 
-    Cached so the connection is made once and shared by all users.
+    live: the Google Sheet at `spreadsheet_url`, or local CSV files in data/ without secrets.
+    test: the Google Sheet at `test_spreadsheet_url` if set, otherwise CSV files in data_test/
+    (on Streamlit Cloud those are temporary: they're wiped when the app restarts).
+    Cached so each connection is made once and shared by all users.
     """
-    creds, url = _secret("gcp_service_account"), _secret("spreadsheet_url")
-    if creds and url:
-        return SheetsStore(creds, url)
-    return CsvStore("data")
+    creds = _secret("gcp_service_account")
+    if mode == "test":
+        url = _secret("test_spreadsheet_url")
+        if url and url == _secret("spreadsheet_url"):
+            raise ValueError("test_spreadsheet_url is your real sheet. Make a separate sheet for testing.")
+        return SheetsStore(creds, url) if creds and url else CsvStore("data_test")
+    url = _secret("spreadsheet_url")
+    return SheetsStore(creds, url) if creds and url else CsvStore("data")
 
 
-store = get_store()
+def data_mode():
+    """"test" while 🧪 Test mode is on for this phone/browser, otherwise "live".
+
+    The public idea page always uses the live data.
+    """
+    if st.query_params.get("page") == "ideas":
+        return "live"
+    return "test" if st.session_state.get("test_mode") else "live"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _load(table, mode):
+    """Read a table from the live or test data (cached, see load)."""
+    return get_store(mode).load(table)
+
+
 def load(table):
-    """Return a table (e.g. "items", "sales") as a DataFrame.
+    """Return a table (e.g. "items", "sales") as a DataFrame, from the live or test data.
 
     Cached for 5 minutes to avoid hitting Google Sheets on every tap. Write with save / append /
     append_rows below: they forget only the table they changed, so the next page only re-reads that one.
     """
-    return store.load(table)
+    return _load(table, data_mode())
 
 
 def save(table, df):
     """Replace a whole table, then forget its cached copy."""
-    store.save(table, df)
-    load.clear(table)
+    mode = data_mode()
+    get_store(mode).save(table, df)
+    _load.clear(table, mode)
 
 
 def append(table, row):
     """Add one row (dict) to a table, then forget its cached copy."""
-    store.append(table, row)
-    load.clear(table)
+    mode = data_mode()
+    get_store(mode).append(table, row)
+    _load.clear(table, mode)
 
 
 def append_rows(table, rows):
     """Add several rows (list of dicts) to a table, then forget its cached copy."""
-    store.append_rows(table, rows)
-    load.clear(table)
+    mode = data_mode()
+    get_store(mode).append_rows(table, rows)
+    _load.clear(table, mode)
+
+
+def get_setting(key, default=""):
+    """A switch saved in the "settings" table (text), or `default` if it was never set."""
+    settings = load("settings")
+    found = settings.loc[settings["key"] == key, "value"]
+    return found.iloc[-1] if not found.empty else default
+
+
+def set_setting(key, value):
+    """Save a switch in the "settings" table."""
+    settings = load("settings")
+    save("settings", pd.concat([settings[settings["key"] != key],
+                                pd.DataFrame([{"key": key, "value": str(value)}])], ignore_index=True))
+
+
+def theme_list():
+    """Your themes (the "themes" table, or THEME_STARTER until you edit the list)."""
+    themes = load("themes")
+    if themes.empty:
+        themes = pd.DataFrame(THEME_STARTER, columns=TABLES["themes"])
+    return themes[themes["name"].str.strip() != ""]
+
+
+def add_holiday_themes():
+    """Add the HOLIDAY_THEMES you don't have yet (by name, ignoring case) to your theme list."""
+    current = theme_list()
+    have = set(current["name"].str.lower())
+    new = [t for t in HOLIDAY_THEMES if t[0].lower() not in have]
+    save("themes", pd.concat([current, pd.DataFrame(new, columns=TABLES["themes"])], ignore_index=True))
+    st.session_state.flash = ("success", "Added " + ", ".join(f"{e} {n}" for n, e, *_ in new))
+
+
+def theme_label(name, themes):
+    """A theme name with its emoji, e.g. "🎄 Xmas"."""
+    emoji = dict(zip(themes["name"], themes["emoji"])).get(name, "")
+    return f"{emoji} {name}".strip()
+
+
+def join_tags(value):
+    """Chosen themes (a list from a table cell or multiselect) back to sheet text, e.g. "Xmas, Couple"."""
+    if isinstance(value, str):
+        return value
+    try:
+        return ", ".join(str(t) for t in value)
+    except TypeError:                                   # empty cell (None / NaN)
+        return ""
+
+
+def theme_emojis(cell, themes):
+    """Just the emojis of a themes cell, e.g. "Xmas, Couple" -> "🎄💕" (short, for headings)."""
+    emoji = dict(zip(themes["name"], themes["emoji"]))
+    return "".join(emoji.get(t, "") for t in insights.tags(cell))
+
+
+def themes_text(cell, themes):
+    """A themes cell for display, e.g. "Xmas, Couple" -> "🎄 Xmas · 💕 Couple"."""
+    return " · ".join(theme_label(t, themes) for t in insights.tags(cell))
+
+
+def copy_live_to_test():
+    """Replace all test data with a copy of the real data, to try things on realistic data."""
+    for table in TABLES:
+        get_store("test").save(table, _load(table, "live"))
+        _load.clear(table, "test")
+    st.session_state.flash = ("success", "🧪 Test data is now a copy of your real data.")
+
+
+def clear_test_data():
+    """Empty every test table, to start testing from scratch."""
+    for table in TABLES:
+        get_store("test").save(table, pd.DataFrame(columns=TABLES[table]))
+        _load.clear(table, "test")
+    st.session_state.flash = ("success", "🧪 Test data cleared.")
 
 
 def new_id():
@@ -176,29 +293,192 @@ def md(text):
     return text.replace("$", r"\$")
 
 
+# Price boxes fill from the right like a cash register: typing 1, 2, 5, 0 shows 0.01, 0.12, 1.25, 12.50.
+# The script finds every text box whose key starts with "money_" and formats it as you type; it also
+# asks phones for the number keypad. It installs itself once per page and watches for new boxes.
+MONEY_JS = """<script>
+(() => {
+  if (window.__moneyBoxes) return;
+  window.__moneyBoxes = true;
+  const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+  const format = (box) => {
+    const digits = box.value.replace(/\\D/g, "").replace(/^0+/, "").slice(0, 9);
+    const padded = digits.padStart(3, "0");
+    const text = digits ? padded.slice(0, -2) + "." + padded.slice(-2) : "";
+    if (box.value !== text) {
+      setValue.call(box, text);
+      box.dispatchEvent(new Event("input", { bubbles: true }));   // tell Streamlit about the new value
+    }
+  };
+  const attach = () => document.querySelectorAll('[class*="st-key-money_"] input').forEach((box) => {
+    if (box.dataset.money) return;
+    box.dataset.money = "1";
+    box.setAttribute("inputmode", "numeric");
+    box.addEventListener("input", () => format(box));
+  });
+  attach();
+  new MutationObserver(attach).observe(document.body, { childList: true, subtree: true });
+})();
+</script>"""
+st.html(MONEY_JS, unsafe_allow_javascript=True)
+
+
+def parse_money(text):
+    """The amount typed in a price box ("12.50", "$1,200") as a float, or None when it's empty or unreadable."""
+    cleaned = str(text or "").replace(CURRENCY, "").replace(",", "").strip()
+    try:
+        return round(float(cleaned), 2) if cleaned else None
+    except ValueError:
+        return None
+
+
+def money_input(label, key, value=None, **kwargs):
+    """A price box that fills from the right (type 1250 for 12.50), with the number keypad on phones.
+
+    Returns the amount as a float, or None when left empty. The widget's key is "money_<key>".
+    """
+    text = st.text_input(label, value=f"{value:.2f}" if value else "", key=f"money_{key}",
+                         placeholder=kwargs.pop("placeholder", "0.00"), **kwargs)
+    return parse_money(text)
+
+
+def show_table(data, column_config=None, **kwargs):
+    """st.dataframe, but every decimal column without its own format shows at most 2 decimals."""
+    config = dict(column_config or {})
+    for col in data.columns:
+        if col not in config and pd.api.types.is_float_dtype(data[col]):
+            config[col] = st.column_config.NumberColumn(format="%.2f")
+    return st.dataframe(data, column_config=config, **kwargs)
+
+
 def deal_text(qty, price):
     """Describe a deal, e.g. "3 for $5.00"."""
     return f"{qty} for {money(price)}"
 
 
 # ---- public idea page (no password; shows nothing from the shop except open idea titles) ----
-def vote_for(request_id, key):
-    """A visitor's 👍 on an existing idea: one more ask, at most once per idea per visit."""
-    voted = st.session_state.setdefault("voted", set())
-    if key in voted:
+VOTER_COOKIE = "booth_voter"
+
+
+def voter_id():
+    """This phone's random voter id (no personal info), so limits survive refreshing the page.
+
+    Read from the phone's cookie; on the first visit a new id is made and saved in a cookie for a year.
+    If the phone blocks cookies, the id only lasts for this visit.
+    """
+    saved = st.context.cookies.get(VOTER_COOKIE, "")
+    if saved.isalnum() and 8 <= len(saved) <= 40:
+        return saved
+    new = st.session_state.setdefault("new_voter_id", uuid.uuid4().hex)
+    st.html(f"<script>document.cookie = '{VOTER_COOKIE}={new}; max-age=31536000; path=/; SameSite=Lax';</script>",
+            unsafe_allow_javascript=True)
+    return new
+
+
+def voted_keys(requests, voter):
+    """The ideas (grouping keys, as in insights.group_requests) this phone has already asked or voted for."""
+    mine = requests[requests["voter"] == voter]
+    return set(insights.request_key(mine["subject"], mine["fandom"], mine["type"]))
+
+
+def vote_for(request_id, key, voter):
+    """A visitor's 👍 on an existing idea: one more ask, at most once per idea per phone."""
+    requests = load("requests")
+    if key in voted_keys(requests, voter):
         return
-    original = load("requests").set_index("request_id").loc[request_id]
+    original = requests.set_index("request_id").loc[request_id]
     append("requests", {"request_id": new_id(), "timestamp": now(), "event": "", "subject": original["subject"],
                         "fandom": original["fandom"], "type": original["type"], "notes": "", "status": "open",
-                        "art_id": "", "source": "online", "contact": ""})
-    voted.add(key)
+                        "art_id": "", "source": "online-vote", "contact": "", "voter": voter})
+
+
+def commission_options():
+    """What you offer as commissions (the "commission_options" table, or COMMISSION_STARTER until edited)."""
+    options = load("commission_options")
+    if options.empty:
+        options = pd.DataFrame(COMMISSION_STARTER, columns=TABLES["commission_options"])
+    return options
+
+
+def open_commission_options():
+    """The commission options visitors can pick right now (ticked as open, with a name)."""
+    options = commission_options()
+    return options[options["open"] & options["name"].str.strip().ne("")]
+
+
+def option_label(o):
+    """How a commission option reads on the idea page, e.g. "Square print (400 × 400 px) · from $15.00"."""
+    return (o["name"] + (f" ({o['details']})" if o["details"] else "")
+            + (f" · from {money(o['price_from'])}" if o["price_from"] else ""))
+
+
+def commission_form(voter):
+    """The public page's private commission request: saved as an order with status "request".
+
+    Only you see it (🗓️ Prep → 📝 Orders), where you accept it with a price or decline it.
+    """
+    st.write(COMMISSION_INTRO)
+    offered = [option_label(o) for _, o in open_commission_options().iterrows()]
+    if len(offered) == 1:
+        st.markdown(md(f"**Kay-chan offers right now:** {offered[0]}"))
+    orders = load("preorders")
+    sent = int(((orders["voter"] == voter) & (orders["created"] == now()[:10])).sum())
+    if st.session_state.pop("commission_thanks", False):
+        st.success("Thank you! Kay-chan will get back to you about it. 💜")
+    if sent >= COMMISSION_LIMIT:
+        st.info("Your request is in! Kay-chan will contact you soon.")
+        return
+    # kept on error (so a long description isn't lost); cleared after sending by deleting the cf_ keys
+    with st.form("public_commission"):
+        what =st.text_area("What would you like?", max_chars=500, height=110, key="cf_what",
+                            placeholder="e.g. Gojo and Shinobu having tea together, chibi style")
+        fandoms = st.text_input("Characters / fandoms (optional)", max_chars=100, key="cf_fandoms",
+                                placeholder="e.g. Jujutsu Kaisen + Demon Slayer")
+        fmt = (st.selectbox("What kind?", offered, index=None, placeholder="Choose one", key="cf_kind")
+               if len(offered) > 1 else offered[0])
+        budget = st.text_input("Budget (optional)", max_chars=40, placeholder=f"e.g. around {CURRENCY}30",
+                               key="cf_budget")
+        due =st.date_input("Needed by (optional)", value=None, min_value=date.today(), key="cf_due")
+        refs = st.text_input("Link to reference pictures (optional)", max_chars=200, key="cf_refs",
+                             placeholder="e.g. a Google Drive or Pinterest link")
+        name = st.text_input("Your name", max_chars=40, key="cf_name")
+        contact = st.text_input("How can Kay-chan reach you?", max_chars=80, key="cf_contact",
+                                placeholder="@instagram, email or phone")
+        if st.form_submit_button("🎨 Send request", type="primary", width="stretch"):
+            if not what.strip() or not name.strip() or not contact.strip() or not fmt:
+                st.error("Please fill in what you'd like, " + ("what kind, " if not fmt else "")
+                         + "your name and how to reach you 🙂")
+                return
+            notes = " · ".join(f"{label}: {value.strip()}" for label, value in
+                               [("Kind", fmt), ("Fandoms", fandoms), ("Budget", budget), ("Refs", refs)]
+                               if value.strip())
+            append("preorders", {
+                "preorder_id": new_id(), "created": now()[:10], "kind": ORDER_KINDS[1], "customer": name.strip(),
+                "contact": contact.strip(), "description": what.strip(), "item_id": "", "qty": 1, "price": 0.0,
+                "deposit": 0.0, "due": due.isoformat() if due else "", "collect_event": "", "status": "request",
+                "notes": notes, "voter": voter})
+            for key in [k for k in st.session_state if str(k).startswith("cf_")]:
+                del st.session_state[key]
+            st.session_state.commission_thanks = True
+            st.rerun()
 
 
 def public_idea_page():
-    """The page visitors see at ?page=ideas: suggest an idea and vote on others. Writes to "requests"."""
+    """The page visitors see at ?page=ideas: suggest an idea and vote on others (writes to "requests"),
+    or, when commissions are open, ask for a commission privately (writes to "preorders")."""
     header(IDEA_PAGE_TITLE, size=72)
+    voter = voter_id()
+    if get_setting("commissions_open", "TRUE") == "TRUE" and not open_commission_options().empty:
+        choice =st.segmented_control("What would you like to do?", ["💡 Suggest an idea", "🎨 Ask for a commission"],
+                                      default="💡 Suggest an idea", key="public_mode", width="stretch",
+                                      label_visibility="collapsed")
+        if choice == "🎨 Ask for a commission":
+            commission_form(voter)
+            return
     st.write(IDEA_PAGE_INTRO)
-    sent = st.session_state.setdefault("ideas_sent", 0)
+    requests = load("requests")
+    sent = int(((requests["voter"] == voter) & (requests["source"] == "online")       # ideas from this phone today
+                & (requests["timestamp"].str[:10] == now()[:10])).sum())
     if st.session_state.pop("idea_thanks", False):
         st.success("Thank you! Your idea is in. 💜")
     if sent >= IDEA_PAGE_LIMIT:
@@ -222,22 +502,22 @@ def public_idea_page():
                                         "subject": subject.strip(), "fandom": fandom.strip(),
                                         "type": "" if mtype in (None, "Something else") else mtype,
                                         "notes": notes.strip(), "status": "open", "art_id": "",
-                                        "source": "online", "contact": contact.strip()})
-                    st.session_state.ideas_sent = sent + 1
+                                        "source": "online", "contact": contact.strip(), "voter": voter})
                     st.session_state.idea_thanks = True
                     st.rerun()
 
-    popular = insights.group_requests(load("requests")).head(10)
+    requests = load("requests")
+    popular = insights.group_requests(requests).head(10)
     if not popular.empty:
         st.subheader("👍 Vote for ideas")
-        st.caption("Tap 👍 on the ones you'd buy too.")
-        voted = st.session_state.get("voted", set())
+        st.caption("Tap 👍 on the ones you'd buy too. One vote per idea.")
+        voted = voted_keys(requests, voter)              # includes ideas this phone suggested itself
         for r in popular.itertuples():
             detail = " · ".join(x for x in [r.fandom, r.type] if x)
             with st.container(horizontal=True, vertical_alignment="center"):
                 st.markdown(md(f"**{r.subject}**" + (f"  \n{detail}" if detail else "")), width="stretch")
                 st.button("✅" if r.key in voted else "👍", key=f"vote_{r.ids[0]}", disabled=r.key in voted,
-                          on_click=vote_for, args=(r.ids[0], r.key))
+                          on_click=vote_for, args=(r.ids[0], r.key, voter))
 
 
 if st.query_params.get("page") == "ideas":
@@ -256,6 +536,9 @@ if password and not st.session_state.get("authed"):
     elif entered:
         st.error("Wrong password")
     st.stop()
+
+# 🧪 Test mode starts off, unless start_in_test_mode = true in secrets (e.g. on your computer)
+st.session_state.setdefault("test_mode", bool(_secret("start_in_test_mode")))
 
 
 # ---- basket (held per phone/browser until the sale is completed) ----
@@ -278,7 +561,7 @@ def clear_basket():
     st.session_state.basket = {}
     st.session_state.freebies = {}
     st.session_state.skip_auto = set()
-    st.session_state.disc_amount = None
+    st.session_state.money_disc = ""
     st.session_state.disc_reason = None
     st.session_state.trade_partner = ""
     st.session_state.trade_received = ""
@@ -362,7 +645,7 @@ DISCOUNT_REASONS = ["🤝 Friend", "🩹 Damaged", "📦 Bundle", "✏️ Other"
 
 def current_discount():
     """The discount typed into the basket (0 if none)."""
-    return float(st.session_state.get("disc_amount") or 0.0)
+    return parse_money(st.session_state.get("money_disc")) or 0.0
 
 
 # ---- actions (run as button callbacks, before the page redraws) ----
@@ -401,7 +684,7 @@ def checkout(event, payment="cash"):
     needed = {}                                  # item_id -> pieces leaving the table (sold + free)
     for line in quote["lines"] + gifts:
         needed[line["item_id"]] = needed.get(line["item_id"], 0) + line["qty"]
-    reserved = insights.reserved_stock(load("preorders"))     # pieces promised to pre-orders can't be sold
+    reserved = insights.reserved_stock(load("preorders"), load("preorder_lines"))   # promised pieces can't be sold
     free_stock = {i: by_id.at[i, "stock"] - reserved.get(i, 0) for i in needed}
     short = [f"{by_id.at[i, 'name']} ({free_stock[i]} left"
              + (f", {reserved[i]} reserved for pre-orders)" if reserved.get(i) else ")")
@@ -543,7 +826,8 @@ def ask_again(request_id, event):
     requests = load("requests")
     original = requests[requests["request_id"] == request_id].iloc[0]
     append("requests", {**original.to_dict(), "request_id": new_id(), "timestamp": now(), "event": event,
-                        "notes": "", "status": "open", "art_id": "", "source": "booth", "contact": ""})
+                        "notes": "", "status": "open", "art_id": "", "source": "booth", "contact": "",
+                        "voter": ""})
     st.session_state.flash = ("success", f"➕1 for {original['subject']}")
 
 
@@ -606,10 +890,14 @@ def advance_batch(batch_id, step):
             batches.at[i, "item_id"] = items.at[j, "item_id"]
         else:
             item_id = new_id()
+            artworks = load("artworks")                    # new merch gets its artwork's themes
+            art_themes = artworks.loc[artworks["art_id"] == b["art_id"], "themes"]
             items = pd.concat([items, pd.DataFrame([{
                 "item_id": item_id, "fandom": b["fandom"], "type": b["type"], "name": b["name"],
                 "price": b["price"], "stock": b["qty"], "active": True, "freebie": False,
-                "every_order": False, "unit_cost": round(unit, 4)}])], ignore_index=True)
+                "every_order": False, "unit_cost": round(unit, 4),
+                "themes": art_themes.iloc[0] if b["art_id"] and not art_themes.empty else ""}])],
+                ignore_index=True)
             batches.at[i, "item_id"] = item_id
             images = load("images")
             art_photo = images[(images["owner_id"] == b["art_id"]) & (b["art_id"] != "")]
@@ -636,10 +924,10 @@ def batch_form(key, art=None):
             ptype = st.selectbox("Product type", types, index=None, accept_new_options=True,
                                  placeholder="e.g. Big sticker, A6 print")
             name = st.text_input("Product name", placeholder=f"Leave blank for \"<type> - {art.title}\"")
-            price = st.number_input(f"Selling price ({CURRENCY})", min_value=0.0, step=0.5, format="%.2f")
+            price = money_input(f"Selling price ({CURRENCY})", f"sell_{key}") or 0.0
         qty = st.number_input("Quantity", min_value=1, step=1, value=10)
-        cost = st.number_input(f"Total cost ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f",
-                               help="What the whole batch cost: printing, shipping, materials")
+        cost = money_input(f"Total cost ({CURRENCY})", f"cost_{key}",
+                           help="What the whole batch cost: printing, shipping, materials") or 0.0
         vendor = st.text_input("Printer / shop", placeholder="e.g. PrintCo, or 'home printer'")
         method = st.selectbox("How", list(METHODS), format_func=lambda m: METHODS[m][0])
         if st.form_submit_button("🏭 Add to production", width="stretch"):
@@ -665,6 +953,21 @@ def batch_form(key, art=None):
 
 # ---- page ----
 header("Booth Tracker")
+st.toggle("🧪 Test mode", key="test_mode", on_change=clear_basket,       # a basket never crosses over
+          help="Try things out on test data. Sales, stock and edits in test mode never touch your real data.")
+if data_mode() == "test":
+    st.html("<style>.stApp, [data-testid='stHeader'] {background: #FFF4D6 !important;}</style>")
+    with st.container(border=True, key="test_banner"):
+        st.markdown("🧪 **Test mode is on.** Everything you do here goes to **test data**, not your real data. "
+                    "Turn it off before selling for real.")
+        if not _secret("test_spreadsheet_url") and _secret("spreadsheet_url"):
+            st.caption("Test data is temporary: it's wiped when the app restarts. To keep it, make a second "
+                       "Google Sheet, share it with the app's email and add `test_spreadsheet_url` to secrets.")
+        with st.expander("Test data tools"):
+            st.button("📋 Copy my real data into test", on_click=copy_live_to_test, width="stretch",
+                      help="Replaces all test data with your real items, events, sales... Real data isn't changed.")
+            st.button("🧹 Clear test data", on_click=clear_test_data, width="stretch",
+                      help="Empties all test data. Real data isn't changed.")
 menu_box = st.container()            # Prep / At the booth / After menu, filled at the end of the file
 
 # Always create the message slot (even when empty): if the page layout above the tabs changed,
@@ -679,6 +982,7 @@ events = load("events").sort_values("date", ascending=False)
 sales = load("sales")
 deals = load("deals")
 freebie_rules = load("freebie_rules")
+themes = theme_list()
 paid_sales = insights.paid(sales)                 # free gifts and trades don't count as items sold
 photos = dict(zip(load("images")["owner_id"], load("images")["data"]))   # owner_id -> base64 JPEG
 
@@ -726,7 +1030,7 @@ def page_sell():
                     ([f"📦 {'Also ready' if not due_today.empty else 'Orders to hand over here'}: {describe(others)}"]
                      if not others.empty else [])
             st.info(md("  \n".join(lines) + "  \nMark them collected in 🗓️ Prep → 📝 Orders."))
-        reserved = insights.reserved_stock(preorders)       # promised to pre-orders: not for sale here
+        reserved = insights.reserved_stock(preorders, load("preorder_lines"))   # promised: not for sale here
 
         basket = st.session_state.setdefault("basket", {})
         quote = quote_basket(basket, items, deals, current_discount()) if basket else None
@@ -783,8 +1087,7 @@ def page_sell():
                         st.caption(md(f"🎁 Spend {money(gap)} more for {'another' if allowed else 'a'} free gift"))
 
                 with st.expander("🏷️ Discount", expanded=bool(quote["discount"])):
-                    st.number_input(f"Amount off ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f",
-                                    value=None, key="disc_amount", placeholder="0.00")
+                    money_input(f"Amount off ({CURRENCY})", "disc")
                     st.pills("Reason", DISCOUNT_REASONS, key="disc_reason")
                 if quote["discount"]:
                     reason = st.session_state.get("disc_reason") or "✏️ Other"
@@ -820,11 +1123,18 @@ def page_sell():
                                label_visibility="collapsed").strip().lower()
         fandoms = sorted(f for f in active["fandom"].unique() if f)
         pick = st.pills("Fandom", fandoms, key="fandom_filter") if len(fandoms) > 1 else None
+        used = {t for cell in active["themes"] for t in insights.tags(cell)}
+        theme_names = [t for t in themes["name"] if t in used]
+        theme_pick = st.pills("Theme", theme_names, key="theme_filter", label_visibility="collapsed",
+                              format_func=lambda t: theme_label(t, themes)) if theme_names else None
         show_photos = active["item_id"].isin(photos.keys()).any() and st.checkbox(
             "📷 Show photos", value=True, key="show_photos")
         shown = active if not pick else active[active["fandom"] == pick]
-        if search:                                   # match name, fandom or type
-            text = (shown["name"] + " " + shown["fandom"] + " " + shown["type"]).str.lower()
+        if theme_pick:
+            shown = shown[shown["themes"].map(lambda cell: theme_pick in insights.tags(cell)).astype(bool)]
+        if search:                                   # match name, fandom, type or theme
+            text = (shown["name"] + " " + shown["fandom"] + " " + shown["type"]
+                    + " " + shown["themes"]).str.lower()
             shown = shown[text.str.contains(search, regex=False)]
             if shown.empty:
                 st.caption(f"No items match \"{search}\".")
@@ -867,12 +1177,15 @@ def page_inventory():
             item_type = st.selectbox("Type", type_options, index=None, accept_new_options=True,
                                      placeholder="Pick or type a new one, e.g. Small sticker")
             name = st.text_input("Merch name", placeholder="e.g. Small sticker - Shinobu")
-            price = st.number_input(f"Single price ({CURRENCY})", min_value=0.0, step=0.5, format="%.2f")
+            price = money_input(f"Single price ({CURRENCY})", "item_price") or 0.0
             stock = st.number_input("Stock", min_value=0, step=1)
             for_sale = st.checkbox("For sale", value=True)
             freebie = st.checkbox("🎁 Can be chosen as a free gift")
             every_order = st.checkbox("📎 Give free with every order",
                                       help="e.g. thank-you sticker or name card: untick For sale, tick this")
+            item_themes = st.multiselect("Themes (optional)", themes["name"].tolist(),
+                                         format_func=lambda t: theme_label(t, themes),
+                                         placeholder="e.g. Xmas, Couple")
             if st.form_submit_button("Add item", width="stretch"):
                 name = name.strip()
                 if not name:
@@ -883,7 +1196,8 @@ def page_inventory():
                     append("items", {"item_id": new_id(), "fandom": (fandom or "").strip(),
                                            "type": (item_type or "").strip(), "name": name,
                                            "price": price, "stock": int(stock), "active": for_sale,
-                                           "freebie": freebie, "every_order": every_order})
+                                           "freebie": freebie, "every_order": every_order,
+                                           "themes": ", ".join(item_themes)})
                     st.session_state.flash = ("success", f"Added {name}")
                     st.rerun()
 
@@ -896,19 +1210,24 @@ def page_inventory():
                    "**🎁 Freebie**: can be chosen as a free gift. "
                    "**📎 Every order**: added free to every order automatically.")
         # item_id as the (hidden) index: data_editor always returns the index, so ids survive edits
+        theme_options = list(dict.fromkeys(themes["name"].tolist()
+                                           + [t for cell in items["themes"] for t in insights.tags(cell)]))
         edited = st.data_editor(
             items.sort_values(["fandom", "type", "name"]).set_index("item_id")
             # items without a photo get an invisible 1-pixel image (empty cells would show "None")
             .assign(photo=lambda df: [f"data:image/jpeg;base64,{photos[i]}" if i in photos else BLANK_IMAGE
-                                      for i in df.index]),
-            column_order=["photo", "fandom", "type", "name", "price", "stock", "unit_cost", "active", "freebie",
-                          "every_order"],
+                                      for i in df.index],
+                    themes=lambda df: df["themes"].map(insights.tags)),     # "Xmas, Couple" -> chips
+            column_order=["photo", "fandom", "type", "name", "themes", "price", "stock", "unit_cost", "active",
+                          "freebie", "every_order"],
             disabled=["photo"],
             column_config={
                 "photo": st.column_config.ImageColumn("📷", width="small"),
                 "fandom": st.column_config.TextColumn("Fandom"),
                 "type": st.column_config.TextColumn("Type"),
                 "name": st.column_config.TextColumn("Merch name", required=True),
+                "themes": st.column_config.MultiselectColumn("🏷️ Themes", options=theme_options,
+                                                             format_func=lambda t: theme_label(t, themes)),
                 "price": st.column_config.NumberColumn(f"Price ({CURRENCY})", min_value=0, format="%.2f"),
                 "stock": st.column_config.NumberColumn("Stock", min_value=0, step=1),
                 "unit_cost": st.column_config.NumberColumn(f"Cost/pc ({CURRENCY})", min_value=0, format="%.2f",
@@ -923,7 +1242,7 @@ def page_inventory():
             if edited["name"].str.strip().eq("").any():
                 st.error("Merch names can't be empty")
             else:
-                save("items", edited.reset_index())
+                save("items", edited.reset_index().assign(themes=lambda df: df["themes"].map(join_tags)))
                 st.session_state.flash = ("success", "Inventory saved")
                 st.rerun()
 
@@ -955,9 +1274,18 @@ def page_inventory():
                 logo_b64=icon_b64()),
                 "price-list.html", "text/html", width="stretch")
 
-        st.subheader("🎉 Deals")
+    st.caption("🎉 Deals, 🎁 free gift rules and 🏷️ the theme list are in 🗓️ Prep → ⚙️ Settings.")
+
+
+# ---- Settings (lists you set up once and change now and then) ----
+def page_settings():
+    """Prep: deals, free gift rules, the theme list and commission options, in one place."""
+    st.caption("Things you set up once and change now and then. Open a section, edit the table, then save.")
+    type_options = sorted(t for t in items["type"].unique() if t)
+
+    with st.expander("🎉 Deals"):
         if not type_options:
-            st.info("Give items a **Type** (e.g. Small sticker) to set up deals like 3 for $5.")
+            st.info("Give items a **Type** (e.g. Small sticker) in 📦 Inventory to set up deals like 3 for $5.")
         else:
             st.caption("A deal covers any mix of items of that type, e.g. any 3 Small stickers for $5. "
                        "Add a row at the bottom; select a row and press delete to remove it.")
@@ -976,7 +1304,7 @@ def page_inventory():
                 st.session_state.flash = ("success", "Deals saved")
                 st.rerun()
 
-        st.subheader("🎁 Free gifts")
+    with st.expander("🎁 Free gifts"):
         gift_names = items.loc[items["freebie"], "name"].tolist()
         st.caption(md(f"When a basket reaches **Spend at least**, you choose that many free gifts from the "
                       f"🎁 Freebie items. {CURRENCY}0 means every purchase gets one. Add rows for tiers, "
@@ -984,7 +1312,7 @@ def page_inventory():
         if gift_names:
             st.caption("Freebie items now: " + ", ".join(gift_names))
         else:
-            st.caption("No items ticked as 🎁 Freebie yet.")
+            st.caption("No items ticked as 🎁 Freebie yet (tick them in 📦 Inventory).")
         edited_rules = st.data_editor(
             freebie_rules, num_rows="dynamic", hide_index=True, width="stretch", key="freebie_editor",
             column_config={
@@ -997,6 +1325,59 @@ def page_inventory():
             save("freebie_rules", edited_rules.dropna(subset=["min_spend", "count"]))
             st.session_state.flash = ("success", "Free gift rules saved")
             st.rerun()
+
+    with st.expander("🏷️ Themes"):
+        st.caption("Tags for items and artworks, like 🎄 Xmas or 💪 Gym. Give festive themes the months they "
+                   "sell in (their season): you get a heads-up 10 weeks before, in ⏰ Coming up and 🎨 Studio, "
+                   "and 🔮 Restock won't suggest reprinting them out of season. Leave the months empty for "
+                   "all-year themes. Renaming a theme doesn't rename it on items already tagged.")
+        edited_themes = st.data_editor(
+            themes, num_rows="dynamic", hide_index=True, width="stretch", key="themes_editor",
+            column_order=["emoji", "name", "from_month", "to_month"],
+            column_config={
+                "emoji": st.column_config.TextColumn("Emoji", width="small"),
+                "name": st.column_config.TextColumn("Theme", required=True),
+                "from_month": st.column_config.SelectboxColumn("Season from", options=insights.MONTHS),
+                "to_month": st.column_config.SelectboxColumn("to", options=insights.MONTHS),
+            })
+        if st.button("💾 Save themes", width="stretch"):
+            keep = edited_themes[edited_themes["name"].fillna("").str.strip() != ""].fillna("")
+            half = (keep["from_month"] == "") != (keep["to_month"] == "")
+            if half.any():
+                st.error("Set both months (e.g. Dec to Dec) or neither for: " + ", ".join(keep.loc[half, "name"]))
+            else:
+                save("themes", keep.assign(name=keep["name"].str.replace(",", " ").str.strip()))
+                st.session_state.flash = ("success", "Themes saved")
+                st.rerun()
+        missing = [t for t in HOLIDAY_THEMES if t[0].lower() not in set(themes["name"].str.lower())]
+        if missing:
+            st.button("📅 Add festive themes from the calendar", on_click=add_holiday_themes, width="stretch",
+                      help="Adds: " + ", ".join(f"{e} {n} ({m1}–{m2})" if m1 != m2 else f"{e} {n} ({m1})"
+                                                for n, e, m1, m2 in missing)
+                           + ". Remove any you don't want, or adjust their months.")
+            st.caption("Adds " + ", ".join(f"{e} {n}" for n, e, *_ in missing)
+                       + ". Hari Raya, CNY, Easter, Mid-Autumn and Deepavali move a little each year, so check "
+                         "their months.")
+
+    with st.expander("🎨 Commission options"):
+        st.caption("What visitors can ask for on your idea page. They pick one of the ✅ open ones. Add a row "
+                   "for something new (e.g. A5 print, chibi sticker); untick Open to pause one without deleting "
+                   "it. Leave *From* empty to not show a price. Switch requests on/off in 📝 Orders.")
+        edited = st.data_editor(
+            commission_options(), num_rows="dynamic", hide_index=True, width="stretch", key="commission_editor",
+            column_config={
+                "name": st.column_config.TextColumn("What", required=True),
+                "details": st.column_config.TextColumn("Size / details"),
+                "price_from": st.column_config.NumberColumn(f"From ({CURRENCY})", min_value=0, format="%.2f"),
+                "open": st.column_config.CheckboxColumn("Open", default=True),
+            })
+        if st.button("💾 Save commission options", width="stretch"):
+            save("commission_options", edited[edited["name"].fillna("").str.strip().ne("")])
+            st.session_state.flash = ("success", "Commission options saved")
+            st.rerun()
+        if open_commission_options().empty:
+            st.warning("Nothing is open, so the idea page only shows ideas.")
+
 
 # ---- Sales ----
 def page_sales():
@@ -1044,7 +1425,7 @@ def page_sales():
         first, last = insights.event_dates(events, choice)
         if choice != "All events" and first != last:
             st.subheader("By day")
-            st.dataframe(insights.by_day(view, first)[["label", "date", "revenue", "orders", "sold"]],
+            show_table(insights.by_day(view, first)[["label", "date", "revenue", "orders", "sold"]],
                          hide_index=True, width="stretch",
                          column_config={"label": "Day", "date": "Date", "revenue": total_col, "orders": "Orders",
                                         "sold": "Items"})
@@ -1054,14 +1435,14 @@ def page_sales():
             by_fandom = (view.assign(fandom=view["fandom"].replace("", "Other"))
                          .groupby("fandom", as_index=False)[["qty", "total"]].sum()
                          .sort_values("total", ascending=False))
-            st.dataframe(by_fandom, hide_index=True, width="stretch",
+            show_table(by_fandom, hide_index=True, width="stretch",
                          column_config={"fandom": "Fandom", "qty": "Sold", "total": total_col})
 
         st.subheader("By item")
         by_item = (view.groupby("item", as_index=False)[["qty", "total", "cost"]].sum()
                    .sort_values("total", ascending=False))
         by_item["profit"] = by_item["total"] - by_item["cost"]
-        st.dataframe(by_item, hide_index=True, width="stretch",
+        show_table(by_item, hide_index=True, width="stretch",
                      column_order=["item", "qty", "total"] + (["profit"] if view["cost"].sum() > 0 else []),
                      column_config={"item": "Item", "qty": "Sold", "total": total_col,
                                     "profit": st.column_config.NumberColumn("Profit", format=f"{CURRENCY}%.2f")})
@@ -1072,7 +1453,7 @@ def page_sales():
             trades = trades[trades["order_id"].isin(trades_given["order_id"])].sort_values("timestamp", ascending=False)
             st.caption(md(f"Normal price of what you traded: {money(trades['value'].sum())}. "
                           "It counts as cost to make, like free gifts, not as sales."))
-            st.dataframe(trades[["timestamp", "event", "partner", "gave", "received"]], hide_index=True,
+            show_table(trades[["timestamp", "event", "partner", "gave", "received"]], hide_index=True,
                          width="stretch",
                          column_config={"timestamp": "Time", "event": "Event", "partner": "With",
                                         "gave": "You gave", "received": "You got"})
@@ -1082,14 +1463,14 @@ def page_sales():
             by_gift = (gifts.assign(value=gifts["unit_price"] * gifts["qty"])
                        .groupby("item", as_index=False)[["qty", "value"]].sum()
                        .sort_values("qty", ascending=False))
-            st.dataframe(by_gift, hide_index=True, width="stretch",
+            show_table(by_gift, hide_index=True, width="stretch",
                          column_config={"item": "Item", "qty": "Given",
                                         "value": st.column_config.NumberColumn("Normal price",
                                                                                format=f"{CURRENCY}%.2f")})
 
         st.subheader("All sales")
         recent = everything.sort_values("timestamp", ascending=False)
-        st.dataframe(recent[["timestamp", "event", "fandom", "item", "qty", "total", "freebie"]],
+        show_table(recent[["timestamp", "event", "fandom", "item", "qty", "total", "freebie"]],
                      hide_index=True, width="stretch",
                      column_config={"timestamp": "Time", "event": "Event", "fandom": "Fandom",
                                     "item": "Item", "qty": "Qty", "total": total_col,
@@ -1115,7 +1496,8 @@ def page_sales():
                       width="stretch")
 
     st.divider()
-    st.download_button("💾 Backup all data (Excel)", backup_workbook(), f"booth-backup-{now()[:10]}.xlsx",
+    st.download_button("💾 Backup all data (Excel)", backup_workbook(),
+                       f"booth-{'TEST-' if data_mode() == 'test' else ''}backup-{now()[:10]}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
     st.caption("Every table in one Excel file, one sheet each. Photos aren't included; they stay in the "
                "Google Sheet.")
@@ -1171,7 +1553,7 @@ def page_insights():
             st.altair_chart(insights.bar_chart(fd, "fandom", "revenue", CURRENCY, "Sales"),
                             width="stretch", theme=None)
         with st.expander("📋 Numbers"):
-            st.dataframe(fd, hide_index=True, width="stretch",
+            show_table(fd, hide_index=True, width="stretch",
                          column_config={"fandom": "Fandom", "revenue": money_col("Sales"), "sold": "Pieces"})
 
         st.subheader("Fandom × product type")
@@ -1180,9 +1562,25 @@ def page_insights():
                    "a gap, or an idea.")
         st.altair_chart(insights.heatmap(ft, CURRENCY), width="stretch", theme=None)
         with st.expander("📋 Numbers"):
-            st.dataframe(ft.sort_values("revenue", ascending=False), hide_index=True, width="stretch",
+            show_table(ft.sort_values("revenue", ascending=False), hide_index=True, width="stretch",
                          column_config={"fandom": "Fandom", "type": "Type", "revenue": money_col("Sales"),
                                         "sold": "Pieces"})
+
+        by_theme = insights.by_theme(scoped, items)
+        if not by_theme.empty:
+            st.subheader("Themes")
+            st.caption("Sales of items tagged with each theme (an item with two themes counts in both). "
+                       "Tag items in 📦 Inventory; their earlier sales count too.")
+            labelled = by_theme.assign(theme=by_theme["theme"].map(lambda t: theme_label(t, themes)))
+            st.altair_chart(insights.bar_chart(labelled, "theme", "revenue", CURRENCY, "Sales"),
+                            width="stretch", theme=None)
+            fth = insights.fandom_by_theme(scoped, items)
+            if fth["fandom"].nunique() > 1 and fth["theme"].nunique() > 1:
+                st.caption("Fandom × theme: which fandoms sell in which themes. Empty squares are untried mixes.")
+                st.altair_chart(insights.heatmap(fth, CURRENCY, column="theme"), width="stretch", theme=None)
+            with st.expander("📋 Numbers"):
+                show_table(labelled, hide_index=True, width="stretch",
+                           column_config={"theme": "Theme", "revenue": money_col("Sales"), "sold": "Pieces"})
 
         ev = insights.by_event(scoped, events, load("event_costs"))
         if scope == "All events" and len(ev) > 1:
@@ -1194,7 +1592,7 @@ def page_insights():
             st.altair_chart(insights.bar_chart(ev, "event", measure, CURRENCY, title,
                                                order=ev["event"].tolist()), width="stretch", theme=None)
             with st.expander("📋 Numbers"):
-                st.dataframe(ev[["event", "date", "revenue", "costs", "profit", "sold", "orders", "avg_order"]],
+                show_table(ev[["event", "date", "revenue", "costs", "profit", "sold", "orders", "avg_order"]],
                              hide_index=True, width="stretch",
                              column_config={"event": "Event", "date": "Date", "revenue": money_col("Sales"),
                                             "costs": money_col("Event costs"), "profit": money_col("Profit"),
@@ -1208,7 +1606,7 @@ def page_insights():
             st.altair_chart(insights.bar_chart(days, "label", "revenue", CURRENCY, "Sales",
                                                order=days["label"].tolist()), width="stretch", theme=None)
             with st.expander("📋 Numbers"):
-                st.dataframe(days[["label", "date", "revenue", "orders", "sold"]], hide_index=True, width="stretch",
+                show_table(days[["label", "date", "revenue", "orders", "sold"]], hide_index=True, width="stretch",
                              column_config={"label": "Day", "date": "Date", "revenue": money_col("Sales"),
                                             "orders": "Orders", "sold": "Pieces"})
 
@@ -1223,6 +1621,10 @@ def page_insights():
 def page_requests():
     """At the booth: note what customers ask for, and tap ➕1 when someone asks for the same thing."""
     requests = load("requests")
+    waiting = int((load("preorders")["status"] == "request").sum())
+    if waiting:
+        st.info(f"🎨 {waiting} commission request{'s' if waiting > 1 else ''} from your idea page waiting for "
+                "an answer: 🗓️ Prep → 📝 Orders.")
     names = events["name"].tolist()
     if not names:
         st.info("Add an event first: 🗓️ Prep → 📅 Events.")
@@ -1291,7 +1693,8 @@ def qr_png(text, scale=8):
 # ---- Cash up (end-of-day check of the takings) ----
 def save_cashup(event, float_key, counted_key, cash_sales):
     """Save an end-of-day cash count for an event (float, cash sales, counted, difference)."""
-    flt, counted = float(st.session_state[float_key]), float(st.session_state[counted_key])
+    flt = parse_money(st.session_state.get(f"money_{float_key}")) or 0.0
+    counted = parse_money(st.session_state.get(f"money_{counted_key}")) or 0.0
     append("cashups", {"cashup_id": new_id(), "timestamp": now(), "event": event, "float": flt,
                              "cash_sales": cash_sales, "counted": counted,
                              "difference": round(counted - flt - cash_sales, 2)})
@@ -1338,10 +1741,9 @@ def page_cashup():
         counts = counts[counts["timestamp"].str[:10] == day]
     cash_sales = float(taken.get("cash", 0.0))
     float_key, counted_key = f"float_{ev}_{day or ''}", f"counted_{ev}_{day or ''}"
-    flt = st.number_input(f"Starting float ({CURRENCY}): cash you brought for change", min_value=0.0, step=5.0,
-                          format="%.2f", value=last_float, key=float_key)
-    counted = st.number_input(f"Cash counted now ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f",
-                              value=None, key=counted_key, placeholder="Count the cash box")
+    flt = money_input(f"Starting float ({CURRENCY}): cash you brought for change", float_key,
+                      value=last_float) or 0.0
+    counted = money_input(f"Cash counted now ({CURRENCY})", counted_key, placeholder="Count the cash box")
     expected = flt + cash_sales
     st.markdown(md(f"Expected in the cash box: **{money(expected)}**  \n"
                    f"{money(flt)} float + {money(cash_sales)} cash sales"))
@@ -1358,7 +1760,7 @@ def page_cashup():
                   args=(ev, float_key, counted_key, cash_sales))
     if not counts.empty:
         st.caption("Saved counts for this day" if day else "Saved counts for this event")
-        st.dataframe(counts[["timestamp", "float", "cash_sales", "counted", "difference"]], hide_index=True,
+        show_table(counts[["timestamp", "float", "cash_sales", "counted", "difference"]], hide_index=True,
                      width="stretch",
                      column_config={"timestamp": "Time", **{c: st.column_config.NumberColumn(
                          t, format=f"{CURRENCY}%.2f") for c, t in [("float", "Float"), ("cash_sales", "Cash sales"),
@@ -1374,8 +1776,16 @@ def page_restock():
     money_col = lambda title: st.column_config.NumberColumn(title, format=f"{CURRENCY}%.2f")
 
     st.subheader("🔮 Next event: what to bring")
+    # seasons are judged on the next event's date (today if none is planned)
+    today = date.today().isoformat()
+    upcoming = events[(events["date"] >= today) & (events["status"].str.lower() != "rejected")]
+    next_event = upcoming.sort_values("date").iloc[0] if not upcoming.empty else None
+    on_day = date.fromisoformat(str(next_event["date"])[:10]) if next_event is not None else date.today()
+    off = insights.off_season_items(items, themes, on_day)
     forecast = insights.restock_forecast(sales, items[items["active"]], events,
-                                         reserved=insights.reserved_stock(load("preorders")))
+                                         reserved=insights.reserved_stock(load("preorders"),
+                                                                          load("preorder_lines")),
+                                         off_season=off)
     st.caption("Based on the average sold per event so far (all events), plus 25% extra, on top of pieces "
                "reserved for pre-orders. A rough guide from past sales, not a promise.")
     need = forecast[forecast["reprint"] > 0]
@@ -1384,7 +1794,14 @@ def page_restock():
     else:
         st.warning("Reprint before the next event: " + ", ".join(
             f"{r.name} (+{int(r.reprint)})" for r in need.itertuples()))
-    st.dataframe(forecast[["name", "avg_per_event", "bring", "stock", "reserved", "reprint"]], hide_index=True,
+    resting = forecast[forecast["off_season"]]
+    if not resting.empty:
+        st.info(md(f"💤 Off-season {'at ' + next_event['name'] if next_event is not None else 'now'}, "
+                   "so no reprint suggested: " + ", ".join(resting["name"])
+                   + ". Bring a few if you like; they're back in the list near their season."))
+    show_table(forecast.assign(name=[("💤 " if o else "") + n for n, o in zip(forecast["name"],
+                                                                              forecast["off_season"])])
+               [["name", "avg_per_event", "bring", "stock", "reserved", "reprint"]], hide_index=True,
                  width="stretch",
                  column_order=["name", "avg_per_event", "bring", "stock"]
                  + (["reserved"] if forecast["reserved"].sum() else []) + ["reprint"],
@@ -1397,7 +1814,7 @@ def page_restock():
     scoped = sales if scope == "All events" else sales[sales["event"] == scope]
     perf = insights.item_performance(scoped, items[items["active"]])
     st.caption("Sold through = share of the pieces you had that sold (sold ÷ (sold + stock left)).")
-    st.dataframe(perf[["name", "sold", "revenue", "profit", "stock", "sell_through"]], hide_index=True,
+    show_table(perf[["name", "sold", "revenue", "profit", "stock", "sell_through"]], hide_index=True,
                  width="stretch",
                  column_order=["name", "sold", "sell_through", "revenue", "stock"]
                  + (["profit"] if insights.headline(scoped)["cost"] > 0 else []),
@@ -1467,7 +1884,7 @@ def page_ai():
                    "and artworks (no customer details) to Anthropic's Claude. Each request costs a few cents.")
         if st.button("✨ Get suggestions", type="primary", width="stretch"):
             brief = insights.ai_brief(scoped, items, events, deals, freebie_rules, load("artworks"), CURRENCY, scope,
-                                      load("requests"), load("event_costs"))
+                                      load("requests"), load("event_costs"), themes)
             stream_into_page(insights.stream_suggestions(api_key, brief, question), "ai_answer")
         elif st.session_state.get("ai_answer"):
             st.markdown(st.session_state.ai_answer)
@@ -1515,16 +1932,40 @@ def coming_up(events, days=60):
     return sorted(found)
 
 
+def season_reminders():
+    """Heads-ups for festive themes in season now or starting within SEASON_HEADS_UP_DAYS, with what you
+    have for them: ideas still being drawn and pieces in stock. A list of Markdown lines, soonest first."""
+    artworks = load("artworks")
+    lines = []
+    for s in insights.season_status(themes, date.today(), SEASON_HEADS_UP_DAYS):
+        # astype(bool): an empty table's map() isn't boolean, and pandas would read it as column names
+        tagged = lambda df: df[df["themes"].map(lambda cell: s["name"] in insights.tags(cell)).astype(bool)]
+        drawing = len(tagged(artworks[artworks["stage"] != "done"]))
+        pieces = int(tagged(items[items["active"]])["stock"].clip(lower=0).sum())
+        label = theme_label(s["name"], themes)
+        soon = f"{s['days'] // 7} weeks" if s["days"] >= 14 else f"{s['days']} day{'s' if s['days'] != 1 else ''}"
+        when = (f"**{label} season is on** (until {s['end'].day} {s['end']:%b})" if s["now"] else
+                f"**{label} season in {soon}** (from {s['start'].day} {s['start']:%b})")
+        have = [f"{drawing} idea{'s' if drawing != 1 else ''} still being drawn" if drawing else "",
+                f"{pieces} pieces in stock" if pieces else ""]
+        lines.append(when + ": " + (" · ".join(h for h in have if h)
+                                    or f"no {s['name']} ideas or merch yet"))
+    return lines
+
+
 def page_events():
     """Prep: convention calendar (deadlines), add events, event costs, and sales/profit per event."""
     upcoming = coming_up(events)
+    seasons = season_reminders()
     st.subheader("⏰ Coming up")
-    if not upcoming:
+    if not upcoming and not seasons:
         st.caption("Nothing in the next 60 days. Add apply-by and pay-by dates in the calendar below.")
     for d, away, text in upcoming:
         when = "today" if away == 0 else "tomorrow" if away == 1 else f"in {away} days"
         line = f"**{text}** · {when} ({d.strftime('%a %d %b')})"
         (st.warning if away <= 7 else st.markdown)(md(line))
+    for line in seasons:
+        st.markdown(md(line))
 
     with st.expander("➕ Add event", expanded=events.empty):
         with st.form("add_event", clear_on_submit=True):
@@ -1611,14 +2052,13 @@ def page_events():
     goods = summary["name"].map(per_event["goods"]).fillna(0.0)
     summary["profit"] = summary["revenue"] - goods - summary["costs"]
     money_col = lambda title: st.column_config.NumberColumn(title, format=f"{CURRENCY}%.2f")
-    st.dataframe(summary, hide_index=True, width="stretch",
+    show_table(summary, hide_index=True, width="stretch",
                  column_config={"name": "Event", "date": "Date", "sold": "Items sold",
                                 "revenue": money_col("Sales"), "costs": money_col("Event costs"),
                      "profit": money_col("Profit")})
     st.caption("Profit = sales − cost to make (incl. free gifts) − event costs.")
 
 # ---- Orders (pre-orders and commissions) ----
-ORDER_KINDS = ["🛍️ Pre-order", "🎨 Commission"]
 ORDER_STEPS = {"taken": "📝 Taken", "making": "✏️ Making", "ready": "📦 Ready", "collected": "✅ Collected"}
 
 
@@ -1640,11 +2080,82 @@ def cancel_preorder(preorder_id):
     st.session_state.flash = ("info", "Order cancelled")
 
 
+def accept_commission(preorder_id):
+    """Accept a commission request from the public page: it becomes a 📝 Taken order with your price."""
+    ss = st.session_state
+    price = parse_money(ss.get(f"money_cprice_{preorder_id}"))
+    if not price:
+        ss.flash = ("error", "Enter the price you agreed before accepting")
+        return
+    preorders = load("preorders")
+    i = preorders.index[preorders["preorder_id"] == preorder_id][0]
+    preorders.loc[i, ["price", "deposit", "status"]] = [price, parse_money(ss.get(f"money_cdep_{preorder_id}")) or 0.0,
+                                                      "taken"]
+    save("preorders", preorders)
+    ss.flash = ("success", f"Accepted {preorders.at[i, 'customer']}'s commission ({money(price)}). "
+                           "It's in your open orders.")
+
+
+def decline_commission(preorder_id):
+    """Decline a commission request (kept under "Cancelled" so you have a record)."""
+    preorders = load("preorders")
+    preorders.loc[preorders["preorder_id"] == preorder_id, "status"] = "declined"
+    save("preorders", preorders)
+    st.session_state.flash = ("info", "Request declined")
+
+
+def commission_requests_box(preorders):
+    """Orders tab: the on/off switch for public commission requests, and the requests waiting for an answer."""
+    is_on = get_setting("commissions_open", "TRUE") == "TRUE"
+    st.toggle("🌐 Take commission requests on the idea page", value=is_on, key="commissions_open",
+              on_change=lambda: set_setting("commissions_open", "TRUE" if st.session_state.commissions_open
+                                            else "FALSE"),
+              help="Visitors to your idea page can send you a private commission request. "
+                   "Turn off when your commission slots are full.")
+    offered = open_commission_options()
+    if offered.empty:
+        st.warning("No commission options are open, so the idea page only shows ideas. "
+                   "Open one in 🗓️ Prep → ⚙️ Settings.")
+    else:
+        st.caption(md("Offering: " + ", ".join(option_label(o) for _, o in offered.iterrows())
+                      + ". Change this in ⚙️ Settings."))
+    waiting = preorders[preorders["status"] == "request"].sort_values("created")
+    if waiting.empty:
+        return
+    st.subheader(f"📥 Commission requests ({len(waiting)})")
+    st.caption("Sent from your idea page. Contact them, agree a price, then accept (or decline).")
+    for o in waiting.itertuples():
+        with st.container(border=True):
+            st.markdown(md(f"**{o.customer}** · {o.contact}  \n{o.description}"))
+            st.caption(md(" · ".join(d for d in [f"sent {o.created}", f"needed by {o.due}" if o.due else "", o.notes]
+                                     if d)))
+            c1, c2 = st.columns(2)
+            with c1:
+                money_input(f"Agreed price ({CURRENCY})", f"cprice_{o.preorder_id}")
+            with c2:
+                money_input(f"Deposit paid ({CURRENCY})", f"cdep_{o.preorder_id}")
+            with st.container(horizontal=True):
+                st.button("✅ Accept", key=f"caccept_{o.preorder_id}", type="primary", width="stretch",
+                          on_click=accept_commission, args=(o.preorder_id,))
+                st.button("🙅 Decline", key=f"cdecline_{o.preorder_id}", width="stretch",
+                          on_click=decline_commission, args=(o.preorder_id,))
+    st.divider()
+
+
+def split_cents(amount, weights):
+    """Split an amount over parts in proportion to weights, in whole cents that add up exactly."""
+    total_cents, total_weight = round(amount * 100), sum(weights) or 1
+    shares = [total_cents * w // total_weight for w in weights[:-1]]
+    shares = [int(s) for s in shares]
+    return [s / 100 for s in shares + [total_cents - sum(shares)]]
+
+
 def collect_preorder(preorder_id, payment):
     """The customer collected their order: record the full price as a sale and mark it collected.
 
-    The sale goes to the order's collect-at event (or the event chosen on the Sell tab). A pre-order
-    of an existing item also takes the pieces out of stock.
+    The sale goes to the order's collect-at event (or the event chosen on the Sell tab). Each item in a
+    pre-order is taken out of stock and gets its own sale lines; the order's price is split over the items
+    in proportion to their normal prices. A commission (no items) is one line.
     """
     preorders, items = load("preorders"), load("items")
     i = preorders.index[preorders["preorder_id"] == preorder_id][0]
@@ -1652,25 +2163,35 @@ def collect_preorder(preorder_id, payment):
     names = load("events")["name"].tolist()
     event = (o["collect_event"] if o["collect_event"] in names
              else st.session_state.get("event") if st.session_state.get("event") in names else names[0])
-    match = items.index[items["item_id"] == o["item_id"]] if o["item_id"] else []
-    if len(match):
-        it = items.loc[match[0]]
-        label, fandom, cost = it["name"], it["fandom"], float(it["unit_cost"])
-        items.loc[match[0], "stock"] = it["stock"] - o["qty"]
-        save("items", items)
+
+    by_id = items.set_index("item_id")
+    lines = insights.order_lines(preorders, load("preorder_lines"))
+    lines = lines[(lines["preorder_id"] == preorder_id) & lines["item_id"].isin(by_id.index)]
+    if lines.empty:                                      # commission, or the item no longer exists
+        parts = [{"item_id": o["item_id"], "item": f"{o['kind'].split(' ', 1)[-1]}: {o['description']}",
+                  "fandom": "", "qty": max(int(o["qty"]), 1), "unit_cost": 0.0, "weight": 1.0}]
     else:
-        label, fandom, cost = f"{o['kind'].split(' ', 1)[-1]}: {o['description']}", "", 0.0
-    qty = max(int(o["qty"]), 1)
-    # Two rows: the deposit (taken earlier, payment "deposit", so it doesn't count towards today's cash)
-    # and the balance paid now. Together they make the full price; the pieces sit on the balance row.
+        parts = [{"item_id": l.item_id, "item": by_id.at[l.item_id, "name"], "fandom": by_id.at[l.item_id, "fandom"],
+                  "qty": int(l.qty), "unit_cost": float(by_id.at[l.item_id, "unit_cost"]),
+                  "weight": float(by_id.at[l.item_id, "price"]) * int(l.qty) or 1.0} for l in lines.itertuples()]
+        for part in parts:
+            items.loc[items["item_id"] == part["item_id"], "stock"] -= part["qty"]
+        save("items", items)
+
+    # Per item, two rows: the deposit share (taken earlier, payment "deposit", so it doesn't count towards
+    # today's cash) and the balance share paid now. The pieces sit on the balance row.
+    balance = split_cents(o["price"] - o["deposit"], [p["weight"] for p in parts])
+    deposit = split_cents(o["deposit"], [p["weight"] for p in parts])
     order_id, timestamp = new_id(), now()
-    row = {"order_id": order_id, "timestamp": timestamp, "event": event, "item_id": o["item_id"], "item": label,
-           "fandom": fandom, "unit_price": round(o["price"] / qty, 2), "freebie": False, "unit_cost": cost,
-           "discount": 0.0, "discount_reason": ""}
-    rows = [{**row, "sale_id": new_id(), "qty": qty, "total": round(o["price"] - o["deposit"], 2),
-             "payment": payment}]
-    if o["deposit"]:
-        rows.append({**row, "sale_id": new_id(), "qty": 0, "total": o["deposit"], "payment": "deposit"})
+    rows = []
+    for part, paid_now, paid_before in zip(parts, balance, deposit):
+        row = {"order_id": order_id, "timestamp": timestamp, "event": event, "item_id": part["item_id"],
+               "item": part["item"], "fandom": part["fandom"],
+               "unit_price": round((paid_now + paid_before) / part["qty"], 2), "freebie": False,
+               "unit_cost": part["unit_cost"], "discount": 0.0, "discount_reason": ""}
+        rows.append({**row, "sale_id": new_id(), "qty": part["qty"], "total": paid_now, "payment": payment})
+        if paid_before:
+            rows.append({**row, "sale_id": new_id(), "qty": 0, "total": paid_before, "payment": "deposit"})
     append_rows("sales", rows)
     preorders.at[i, "status"] = "collected"
     save("preorders", preorders)
@@ -1678,37 +2199,70 @@ def collect_preorder(preorder_id, payment):
                                          f"(balance {money(o['price'] - o['deposit'])} paid by {PAYMENTS[payment]})")
 
 
+def order_summary(qtys, names):
+    """A short description of an order's items, e.g. "2× Small sticker - Shinobu, 1× Hashira sheet"."""
+    return ", ".join(f"{q}× {names.get(i, '?')}" for i, q in qtys.items())
+
+
+def save_preorder():
+    """Save the "New order" form (read from its widgets): the order, plus one line per item, then clear the form.
+
+    An empty total uses the normal price of the items (with deals); an empty description lists the items.
+    """
+    ss = st.session_state
+    items = load("items")
+    names = dict(zip(items["item_id"], items["name"]))
+    qtys = {i: int(ss.get(f"po_qty_{i}", 1)) for i in ss.get("po_items", [])}
+    normal_price = quote_basket(qtys, items, load("deals"))["total"] if qtys else 0.0
+    customer = (ss.get("po_customer") or "").strip()
+    description = (ss.get("po_desc") or "").strip() or order_summary(qtys, names)
+    if not customer or not description:
+        ss.flash = ("error", "Add the customer's name and what they ordered")
+        return
+    price = parse_money(ss.get("money_order_price"))
+    preorder_id = new_id()
+    append("preorders", {
+        "preorder_id": preorder_id, "created": now()[:10], "kind": ss.get("po_kind", ORDER_KINDS[0]),
+        "customer": customer, "contact": (ss.get("po_contact") or "").strip(), "description": description,
+        "item_id": "", "qty": sum(qtys.values()) or 1,
+        "price": price if price is not None else (normal_price if qtys else 0.0),
+        "deposit": parse_money(ss.get("money_order_deposit")) or 0.0,
+        "due": ss["po_due"].isoformat() if ss.get("po_due") else "", "collect_event": ss.get("po_collect") or "",
+        "status": "taken", "notes": (ss.get("po_notes") or "").strip()})
+    if qtys:
+        append_rows("preorder_lines", [{"preorder_id": preorder_id, "item_id": i, "qty": q} for i, q in qtys.items()])
+    for key in ("po_customer", "po_contact", "po_desc", "po_notes", "money_order_price", "money_order_deposit"):
+        ss[key] = ""
+    ss["po_items"], ss["po_due"], ss["po_collect"] = [], None, None
+    ss.flash = ("success", f"Saved order for {customer}")
+
+
 def page_orders():
     """Prep: pre-orders and commissions, from taken to collected."""
     preorders = load("preorders")
+    commission_requests_box(preorders)
+    preorders = preorders[preorders["status"] != "request"]
     with st.expander("➕ New order", expanded=preorders.empty):
-        with st.form("add_preorder", clear_on_submit=True):
-            kind = st.selectbox("Kind", ORDER_KINDS)
-            customer = st.text_input("Customer name")
-            contact = st.text_input("Contact (optional)", placeholder="e.g. @insta_handle or phone")
-            description = st.text_input("What they ordered", placeholder="e.g. A5 bust commission of their OC")
-            names = dict(zip(items["item_id"], items["name"]))
-            item_id = st.selectbox("Existing item (pre-orders, optional)", sorted(names, key=names.get), index=None,
-                                   format_func=names.get, placeholder="Choose if it's merch you already sell")
-            qty = st.number_input("Quantity", min_value=1, step=1, value=1)
-            price = st.number_input(f"Total price ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f")
-            deposit = st.number_input(f"Deposit paid ({CURRENCY})", min_value=0.0, step=1.0, format="%.2f")
-            due = st.date_input("Due (optional)", value=None)
-            collect = st.selectbox("Collect at event (optional)", events["name"].tolist(), index=None,
-                                   placeholder="Choose an event")
-            notes = st.text_input("Notes (optional)")
-            if st.form_submit_button("📝 Save order", width="stretch"):
-                if not customer.strip() or not (description.strip() or item_id):
-                    st.error("Add the customer's name and what they ordered")
-                else:
-                    append("preorders", {
-                        "preorder_id": new_id(), "created": now()[:10], "kind": kind, "customer": customer.strip(),
-                        "contact": contact.strip(), "description": description.strip() or names.get(item_id, ""),
-                        "item_id": item_id or "", "qty": int(qty), "price": price, "deposit": deposit,
-                        "due": due.isoformat() if due else "", "collect_event": collect or "",
-                        "status": "taken", "notes": notes.strip()})
-                    st.session_state.flash = ("success", f"Saved order for {customer.strip()}")
-                    st.rerun()
+        st.selectbox("Kind", ORDER_KINDS, key="po_kind")
+        st.text_input("Customer name", key="po_customer")
+        st.text_input("Contact (optional)", key="po_contact", placeholder="e.g. @insta_handle or phone")
+        names = dict(zip(items["item_id"], items["name"]))
+        picked = st.multiselect("Items they ordered", sorted(names, key=names.get), format_func=names.get,
+                                key="po_items", placeholder="Choose merch you sell (leave empty for a commission)")
+        qtys = {i: st.number_input(f"How many: {names[i]}", min_value=1, step=1, value=1, key=f"po_qty_{i}")
+                for i in picked}
+        normal = quote_basket(qtys, items, deals)["total"] if qtys else 0.0
+        if qtys:
+            st.caption(md(f"Normal price, with deals: **{money(normal)}**. Leave the total empty to use it."))
+        st.text_input("What they ordered" + (" (optional)" if qtys else ""), key="po_desc",
+                      placeholder=order_summary(qtys, names) if qtys else "e.g. A5 bust commission of their OC")
+        money_input(f"Total price ({CURRENCY})", "order_price", placeholder=f"{normal:.2f}" if qtys else "0.00")
+        money_input(f"Deposit paid ({CURRENCY})", "order_deposit")
+        st.date_input("Due (optional)", value=None, key="po_due")
+        st.selectbox("Collect at event (optional)", events["name"].tolist(), index=None, key="po_collect",
+                     placeholder="Choose an event")
+        st.text_input("Notes (optional)", key="po_notes")
+        st.button("📝 Save order", type="primary", width="stretch", on_click=save_preorder)
 
     if preorders.empty:
         st.caption("Orders you take show up here, from 📝 Taken to ✅ Collected.")
@@ -1738,12 +2292,12 @@ def page_orders():
         is_open = preorders["status"].isin(insights.OPEN_ORDER_STATUSES)
     show = st.pills("Show", ["Open", "Collected", "Cancelled"], default="Open", key="order_filter") or "Open"
     shown = {"Open": preorders[is_open], "Collected": preorders[preorders["status"] == "collected"],
-             "Cancelled": preorders[preorders["status"] == "cancelled"]}[show]
+             "Cancelled": preorders[preorders["status"].isin(["cancelled", "declined"])]}[show]
     if shown.empty:
         st.info("Nothing here.")
     for o in shown.sort_values(["due", "created"]).itertuples():
         with st.container(border=True):
-            what = o.description + (f" ×{o.qty}" if o.qty > 1 else "")
+            what = o.description + (f" ×{o.qty}" if o.item_id and o.qty > 1 else "")   # new orders list items
             st.markdown(md(f"**{o.customer}** · {o.kind}  \n{what}"))
             details = [ORDER_STEPS.get(o.status, o.status.title()), f"due {o.due}" if o.due else "",
                        f"collect at {o.collect_event}" if o.collect_event else "", o.contact]
@@ -1817,8 +2371,10 @@ def page_promo():
     st.caption("Ready-to-post images of what you sell: photos, prices and deals, with your avatar.")
     fmt = st.pills("Size", ["post", "story"], default="post", key="cat_fmt",
                    format_func={"post": "Post (4:5)", "story": "Story (9:16)"}.get) or "post"
-    group = st.pills("One image per", ["type", "fandom"], default="type", key="cat_group",
+    group = st.pills("One image per", ["type", "fandom", "theme"], default="type", key="cat_group",
                      format_func=str.title) or "type"
+    if group == "theme":
+        st.caption("One collection per theme, e.g. a Xmas catalog. Items without themes are left out.")
     title = st.text_input("Title", value="My merch", key="cat_title", max_chars=40)
     subtitle = st.text_input("Line under the title", key="cat_sub", max_chars=60,
                              placeholder="e.g. @your_handle | Cash, card & PayNow")
@@ -1900,7 +2456,7 @@ def page_kit(field):
                 st.caption("**📦 Orders to bring**")
                 for o in orders.sort_values("customer").itertuples():
                     tick_id = f"order_{o.preorder_id}"
-                    label = f"{o.customer}: {o.description}" + (f" ×{o.qty}" if o.qty > 1 else "")
+                    label = f"{o.customer}: {o.description}" + (f" ×{o.qty}" if o.item_id and o.qty > 1 else "")
                     if o.status != "ready":
                         label += f" · ⚠️ _not ready yet ({ORDER_STEPS[o.status].split(' ', 1)[1].lower()})_"
                     key = f"kit_{field}_{kit_event}_{tick_id}"
@@ -1937,12 +2493,18 @@ def page_studio():
                            key="studio_view", label_visibility="collapsed")
 
     if studio_view != "🏭 Production":
+        seasons = season_reminders()
+        if seasons:
+            st.info(md("  \n".join(seasons)))
         with st.expander("💡 New idea", expanded=artworks.empty):
             with st.form("add_art", clear_on_submit=True):
                 title = st.text_input("Title", placeholder="e.g. Psyduck in a raincoat")
                 art_fandoms = sorted((set(items["fandom"]) | set(artworks["fandom"])) - {""})
                 art_fandom = st.selectbox("Fandom", art_fandoms, index=None, accept_new_options=True,
                                           placeholder="Pick or type a new one")
+                art_themes = st.multiselect("Themes (optional)", themes["name"].tolist(),
+                                            format_func=lambda t: theme_label(t, themes),
+                                            placeholder="e.g. Halloween, Couple")
                 target = st.selectbox("For event (optional)", events["name"].tolist(), index=None,
                                       placeholder="No deadline")
                 notes = st.text_area("Notes", placeholder="Ideas, colours, size...", height=80)
@@ -1954,7 +2516,8 @@ def page_studio():
                         append("artworks", {"art_id": new_id(), "title": title.strip(),
                                                   "fandom": (art_fandom or "").strip(), "stage": "idea",
                                                   "target_event": target or "", "notes": notes.strip(),
-                                                  "link": link.strip(), "created": now()[:10]})
+                                                  "link": link.strip(), "created": now()[:10],
+                                                  "themes": ", ".join(art_themes)})
                         st.session_state.flash = ("success", f"Added idea: {title.strip()}")
                         st.rerun()
 
@@ -1993,14 +2556,16 @@ def page_studio():
                     continue
                 st.caption(f"**{label}**")
                 for art in group.sort_values("created").itertuples():
-                    heading = art.title + (f" · {art.fandom}" if art.fandom else "")
+                    emojis = theme_emojis(art.themes, themes)
+                    heading = art.title + (f" · {art.fandom}" if art.fandom else "") + (f" {emojis}" if emojis else "")
                     with st.expander(md(heading)):
                         if art.art_id in photos:
                             st.image(photo_bytes(art.art_id), width=200)
                         st.file_uploader("📷 Progress picture" + (" (replace)" if art.art_id in photos else ""),
                                          type=PHOTO_TYPES, key=f"up_{art.art_id}",
                                          on_change=set_photo, args=(art.art_id, f"up_{art.art_id}"))
-                        details = [f"📅 for {art.target_event}" if art.target_event else "",
+                        details = [themes_text(art.themes, themes),
+                                   f"📅 for {art.target_event}" if art.target_event else "",
                                    f"added {art.created}"]
                         st.caption(md(" · ".join(d for d in details if d)))
                         if art.notes:
@@ -2018,6 +2583,10 @@ def page_studio():
                             with st.form(f"artform_{art.art_id}"):
                                 new_title = st.text_input("Title", value=art.title)
                                 new_fandom = st.text_input("Fandom", value=art.fandom)
+                                current = insights.tags(art.themes)
+                                new_themes = st.multiselect(
+                                    "Themes", list(dict.fromkeys(themes["name"].tolist() + current)),
+                                    default=current, format_func=lambda t: theme_label(t, themes))
                                 ev_names = events["name"].tolist()
                                 new_target = st.selectbox("For event", ev_names, placeholder="No deadline",
                                                           index=ev_names.index(art.target_event)
@@ -2030,9 +2599,11 @@ def page_studio():
                                         artworks = artworks[artworks["art_id"] != art.art_id]
                                     else:
                                         artworks.loc[artworks["art_id"] == art.art_id,
-                                                     ["title", "fandom", "target_event", "notes", "link"]] = [
+                                                     ["title", "fandom", "target_event", "notes", "link",
+                                                      "themes"]] = [
                                             new_title.strip() or art.title, new_fandom.strip(),
-                                            new_target or "", new_notes.strip(), new_link.strip()]
+                                            new_target or "", new_notes.strip(), new_link.strip(),
+                                            ", ".join(new_themes)]
                                     save("artworks", artworks)
                                     st.session_state.editing_art = None
                                     st.rerun()
@@ -2079,7 +2650,7 @@ def page_studio():
         if not finished.empty:
             st.subheader("Finished batches")
             done_view = finished.assign(per_piece=finished["cost"] / finished["qty"].where(finished["qty"] > 0))
-            st.dataframe(done_view.sort_values("received", ascending=False)
+            show_table(done_view.sort_values("received", ascending=False)
                          [["received", "name", "qty", "cost", "per_piece", "vendor"]],
                          hide_index=True, width="stretch",
                          column_config={"received": "Received", "name": "Item", "qty": "Qty",
@@ -2093,7 +2664,7 @@ def page_studio():
 MENU = {
     "🗓️ Prep": [("🎨 Studio", page_studio), ("📦 Inventory", page_inventory), ("📝 Orders", page_orders),
                 ("📅 Events", page_events), ("📣 Promo", page_promo),
-                  ("🧳 Packing", lambda: page_kit("packed"))],
+                ("🧳 Packing", lambda: page_kit("packed")), ("⚙️ Settings", page_settings)],
     "🛒 At the booth": [("🛒 Sell", page_sell), ("💬 Requests", page_requests), ("💵 Cash up", page_cashup),
                        ("🧳 Pack up", lambda: page_kit("returned"))],
     "📈 After": [("📊 Sales", page_sales), ("📈 Insights", page_insights), ("🔮 Restock", page_restock),
